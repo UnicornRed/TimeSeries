@@ -1,0 +1,2302 @@
+---
+title: "TimeSeries"
+author: "Mikhail Oleynik"
+date: "2025-02-15"
+output:
+  html_document:
+    toc: true
+    toc_float: true
+    toc_collapsed: true
+    number_sections: true
+---
+
+
+```{r}
+source("eossa_new.r")
+library(dplyr)
+library(stats)
+library(readr)
+library(stats)
+library(Rssa)
+library(hpfilter)
+library(MASS)
+library(lattice)
+library(quadprog)
+library(igraph)
+library(urca)
+library(tseries)
+
+set.seed(52)
+```
+
+# Косинус с периодом, совпадающим с решёткой
+
+```{r}
+date <- 1:169
+ts_cos <- ts(cos(2 * pi * date / 13 + 2), frequency = 13)
+
+plot.ts(ts_cos, type="l")
+```
+
+```{r}
+spec.pgram(ts_cos, taper = 0, log='no', fast = FALSE)
+```
+
+Явно выделенный пик.
+
+# Косинус с периодом, не совпадающим с решёткой
+
+```{r}
+date <- 1:150
+ts_cos_2 <- ts(cos(2 * pi * date / 13 + 2), frequency = 13)
+
+plot.ts(ts_cos_2, type="l")
+spec.pgram(ts_cos_2, taper = 0, log='no', fast = FALSE)
+```
+
+Видим растекание периодограммы.
+
+# Белый шум
+
+```{r}
+ts_white <- ts(rnorm(1000))
+plot.ts(ts_white, type="l")
+spec.pgram(ts_white, taper = 0, log='no', fast = FALSE)
+```
+
+Видно, что значения абсолютно случайны, с близким к экспоненциальному распределению.
+
+# Красный шум
+
+```{r}
+generate_red_noise_ar1 <- function(n, phi, sigma = 1, x0 = rnorm(1, 0, 1 / sqrt(1 - phi ** 2))) {
+  x <- numeric(n)
+  x[1] <- x0
+  
+  for (i in 2:n) {
+    x[i] <- phi * x[i - 1] + rnorm(1, mean = 0, sd = sigma)
+  }
+  
+  x
+}
+
+n <- 1000
+phi <- 0.9
+red_noise <- generate_red_noise_ar1(n, phi)
+ts_red <- ts(red_noise)
+
+plot.ts(ts_red, type="l")
+spec.pgram(ts_red, taper = 0, log='no', fast = FALSE)
+```
+
+
+# Увеличение длины ряда
+
+Возьмём $2$ косинуса и красный шум и будем менять длину ряда:
+
+```{r}
+for (i in 1:8) {
+  last <- i * 100
+  ts_w_cos <- ts(0.8 * cos(2 * pi * (1:(last)) / 10 + 3) + cos(2 * pi * (1:(last)) / 20 + 3) + 0.5 * generate_red_noise_ar1(last, phi) + rnorm(last))
+  spec.pgram(ts_w_cos, taper = 0, log='no', fast = FALSE)
+}
+```
+
+Видим увеличение пиков сезонности по сравнению с шумовыми компонентами.
+
+# Реальные данные
+
+## Данные по электричеству
+
+Данные по выработке электричеству в США:
+
+```{r}
+electricity_data <- read_csv("electricity_data.csv")
+electricity_data <- electricity_data[1:252, ]
+```
+
+```{r}
+ts_electr_1 <- ts(as.vector(electricity_data$`United States : all sectors`), frequency = 12)
+plot.ts(ts_electr_1, type="l")
+spec.pgram(ts_electr_1, taper = 0, log='no', fast = FALSE, detrend = TRUE)
+```
+
+Видим отчётливые пики, то есть наблюдается периодичность.
+
+Можно рассмотреть другой ряд:
+
+```{r}
+electricity_data$electr <- electricity_data$`United States : independent power producers`
+ts_electr_2 <- ts(as.vector(electricity_data$electr), frequency = 12)
+plot.ts(ts_electr_2, type="l")
+spec_electr <- spec.pgram(ts_electr_2, taper = 0, log='no', fast = FALSE, detrend = TRUE)
+```
+
+Здесь чуть лучше виден тренд.
+
+# Выделение тренда полиномиальной регрессией
+
+Возьмём аппроксимацию ряда полиномом 4-ой степени:
+
+```{r}
+lm_electr <- lm(electr ~ poly(...1, 4, raw = TRUE), data = electricity_data)
+summary(lm_electr)
+ts_electr_poly <- ts(predict(lm_electr), frequency = 12)
+plot(ts_electr_2, type = "l")
+lines(ts_electr_poly)
+```
+
+# Loess
+
+## Выделяем тренд обычным Loess
+
+Применим локальную регрессию с разным параметрами сглаживания:
+
+```{r}
+electricity_data$index <- 1:nrow(electricity_data) 
+loess_electr_10 <- loess(electr ~ index, data = electricity_data, span = 0.1)
+loess_electr_30 <- loess(electr ~ index, data = electricity_data, span = 0.3)
+loess_electr_50 <- loess(electr ~ index, data = electricity_data, span = 0.5)
+ts_electr_loess_10 <- ts(predict(loess_electr_10), frequency = 12)
+ts_electr_loess_30 <- ts(predict(loess_electr_30), frequency = 12)
+ts_electr_loess_50 <- ts(predict(loess_electr_50), frequency = 12)
+plot(ts_electr_2, type = "l")
+lines(ts_electr_loess_10, col = "red")
+lines(ts_electr_loess_30, col = "blue")
+lines(ts_electr_loess_50, col = "green")
+legend(x="bottomright", c("time series", "0.1 span", "0.3 span", "0.5 span"), col = c("black", "red", "blue", "green"), lty = 1, lwd = 1)
+```
+
+$0.3$ --- оптимальный параметр для ряда.
+
+## Работа с выбросами
+
+Добавим к данным два выброса и учтём веса для этих наблюдений:
+
+```{r}
+electr_data_outliers <- data.frame(index = electricity_data$index, electr = electricity_data$electr)
+electr_data_outliers[25, 2] <- 50000
+electr_data_outliers[200, 2] <- 50000
+loess_electr_out_30 <- loess(electr ~ index, data = electr_data_outliers, family="symmetric", span = 0.3, control = loess.control(surface = "direct", iterations = 1))
+loess_electr_out_noweight_30 <- loess(electr ~ index, data = electr_data_outliers, family="symmetric", span = 0.3, control = loess.control(surface = "direct", iterations = 25))
+weight_loess <- rep(1, nrow(electr_data_outliers))
+weight_loess[25] <- 0.1
+weight_loess[200] <- 0.1
+loess_electr_out_off_30 <- loess(electr ~ index, data = electr_data_outliers, family="symmetric", weights = weight_loess, span = 0.3)
+ts_electr_2_out <- ts(electr_data_outliers$electr, frequency = 12)
+ts_electr_loess_out_30 <- ts(predict(loess_electr_out_30), frequency = 12)
+ts_electr_loess_out_noweight_30 <- ts(predict(loess_electr_out_noweight_30), frequency = 12)
+ts_electr_loess_out_off_30 <- ts(predict(loess_electr_out_off_30), frequency = 12)
+plot(ts_electr_2_out, type = "l")
+lines(ts_electr_loess_out_noweight_30, col = "purple")
+lines(ts_electr_loess_out_30, col = "blue")
+lines(ts_electr_loess_out_off_30, col = "green")
+legend(x = "bottomright", c("original", "iterative", "no iterative", "weight"), col = c("black", "purple", "blue", "green"), lty = 1, lwd = 1)
+plot(loess_electr_out_30$residuals, type = "l", main = "no iterative")
+plot(loess_electr_out_noweight_30$residuals, type = "l", main = "iterative")
+plot(loess_electr_out_off_30$residuals, type = "l", main = "weight")
+```
+
+Учёт весов (ручной (weight) и автоматический (iterative)) действительно дал близкий к правильному результат.
+
+# HP-фильтр
+
+Применим фильтр Ходрика-Прескота для выделения тренда:
+
+```{r}
+y = data.frame(electr = electricity_data$electr)
+ts_electr_hp_1 = ts(hp2(y, lambda = 14400)$electr, frequency = 12)
+ts_electr_hp_2 = ts(hp2(y, lambda = 129606)$electr, frequency = 12)
+plot(ts_electr_2, type="l")
+lines(ts_electr_hp_1, col="red")
+lines(ts_electr_hp_2, col="blue")
+legend(x="bottomright", c("time series", "lambda = 14400", "lambda = 129606"), col = c("black", "red", "blue"), lty = 1, lwd = 1)
+```
+
+$\lambda = 14400$ --- оптимальный параметр, судя по поведению ряда.
+
+# Автокорреляционная функция
+
+## Белый шум
+
+```{r}
+acf(ts_white)
+```
+
+## Красный шум
+
+```{r}
+acf(ts_red)
+```
+
+## Косинус
+
+```{r}
+acf(ts_cos)
+```
+
+## Линейный тренд
+
+```{r}
+acf(0.5 * (1:100) - 10)
+```
+
+## Реальные данные (электричество)
+
+```{r}
+acf(ts_electr_2)
+```
+
+Тренд + сезонность.
+
+# Амплитудно-частотная характеристика
+
+```{r}
+afc <- function(filter, omega) {
+  k <- seq_along(filter) - 1
+  h <- function(o) sum(rev(filter) * exp(-k*1i * o))
+  abs(sapply(omega, h))
+}
+
+freq <- seq(0, pi, 0.001)
+omega <- freq/2/pi
+```
+
+## Скользящее среднее
+
+```{r}
+filt <- rep(1, 10)
+plot(afc(filt, freq) ~ omega, type = "l")
+```
+
+Применим к косинусу:
+
+```{r}
+ts_cos_filter <- stats::filter(ts_cos, rep(1, 5) / 5, sides = 2)
+ts_cos_filter_shift <- stats::filter(ts_cos, rep(1, 5) / 5, sides = 1)
+plot(ts_cos, type = "l", col = "gray", lwd = 1, main = "Фильтрация временного ряда", ylab = "Значение", xlab = "Время")
+lines(ts_cos_filter, col = "red", lwd = 2)
+lines(ts_cos_filter_shift, col = "blue", lwd = 2)
+```
+
+Видно смещение у одностороннего фильтра и уменьшение амплитуды у обоих.
+
+Фильтр с продлением на концы:
+
+```{r}
+filter_continue <- function(time_series, coef_filter, normalize = TRUE){
+  n <- length(time_series)
+  k <- length(coef_filter)
+  filtered_series <- numeric(n)
+  
+  for (i in 1:n) {
+    left_bound <- max(1, i - (k - 1) %/% 2)
+    right_bound <- min(n, i + k %/% 2)
+    
+    sub_series <- time_series[left_bound:right_bound]
+    sub_filter <- coef_filter[(left_bound - i + (k - 1) %/% 2 + 1):(right_bound - i + (k - 1) %/% 2 + 1)]
+    
+    if (normalize) {
+      sub_filter <- sub_filter / sum(abs(sub_filter))
+    }
+    
+    filtered_series[i] <- sum(sub_series * sub_filter)
+  }
+  
+  filtered_series
+}
+```
+
+Теперь к периодограмме белого шума:
+
+```{r}
+ts_pgram_white <- ts(spec.pgram(ts_white, taper = 0, log='no', fast = FALSE, plot = FALSE)$spec)
+ts_pgram_white_filter <- filter_continue(ts_pgram_white, rep(1, 20))
+ts_pgram_white_filter_80 <- filter_continue(ts_pgram_white, rep(1, 80))
+plot(ts_pgram_white)
+lines(ts_pgram_white_filter, type = "l", col = "blue", lwd = 1)
+lines(ts_pgram_white_filter_80, type = "l", col = "red", lwd = 1)
+```
+
+К периодограмме красного шума:
+
+```{r}
+ts_red_7 <- ts(generate_red_noise_ar1(n, 0.7))
+ts_pgram_red <- ts(spec.pgram(ts_red_7, taper = 0, log='no', fast = FALSE, plot = FALSE)$spec)
+ts_pgram_red_filter <- filter_continue(ts_pgram_red, rep(1, 40))
+plot(ts_pgram_red)
+lines(ts_pgram_red_filter, type = "l", col = "blue", lwd = 1)
+```
+
+## Последовательные разности
+
+```{r}
+filt <- c(-1,1)
+plot(afc(filt, freq) ~ omega, type = "l")
+```
+
+Попробуем применить фильтр к ряду с сезонностью и трендом:
+
+```{r}
+ts_lin_sin <- ts(1/2 * (1:100) + cos(2 * pi * (1:100) / 5))
+plot(ts_lin_sin)
+ts_lin_sin_filter <- filter_continue(ts_lin_sin, c(-1, 1))
+plot(ts_lin_sin_filter, type = "l")
+pgram_lin_sin <- spec.pgram(ts_lin_sin, taper = 0, log='no', fast = FALSE, demean = FALSE, detrend = FALSE)
+pgram_lin_sin_filter_culc <- pgram_lin_sin
+pgram_lin_sin_filter_culc$spec <- pgram_lin_sin$spec * afc(c(-1, 1), seq(pi / 50, pi, pi / 50)) ** 2
+pgram_lin_sin_filter <- spec.pgram(ts_lin_sin_filter, taper = 0, log='no', fast = FALSE, demean = FALSE, detrend = FALSE)
+
+plot(pgram_lin_sin_filter_culc$spec, type = "l")
+```
+
+Видим, что фильтр действительно убирает тренд.
+
+## Реальные данные (электричество)
+
+```{r}
+ts_electr_2_filter_24_1 <- ts(filter_continue(ts_electr_2, c(1 / 2, rep(1, 23), 1 / 2)), frequency = 12)
+ts_electr_2_filter_24_2 <- ts(filter_continue(ts_electr_2_filter_24_1, c(1 / 2, rep(1, 23), 1 / 2)), frequency = 12)
+ts_electr_2_filter_34 <- ts(filter_continue(ts_electr_2, c(1 / 2, rep(1, 47), 1 / 2)), frequency = 12)
+plot(ts_electr_2, type = "l", col = "gray", lwd = 1, main = "Фильтрация временного ряда", ylab = "Значение", xlab = "Время")
+lines(ts_electr_2_filter_24_1, col = "red", lwd = 2)
+lines(ts_electr_2_filter_34, col = "blue", lwd = 2)
+lines(ts_electr_2_filter_24_2, col = "green", lwd = 2)
+legend(x = "bottomright", c("original", "filter 24", "filter 34", "filter 24 (x2)"), col = c("gray", "red", "blue", "green"), lty =  1, lwd = c(1, 2, 2, 2))
+spec.pgram(ts_electr_2_filter_24_2, taper = 0, log='no', fast = FALSE, detrend = TRUE, na.action = na.omit)
+```
+
+Тренд явно выделился по сравнению с прошлой периодограммой.
+
+# SSA
+
+## Экспонента
+
+```{r}
+ts_exp <- ts(1.1 ** (1:100))
+s_exp <- ssa(ts_exp, kind = "1d-ssa", svd.method = "svd")
+
+plot(ts_exp)
+plot(s_exp)
+plot(s_exp, type = "vectors", idx = 1:3)
+plot(s_exp, type = "paired", idx = 1:3, plot.contrib = FALSE)
+plot(wcor(s_exp, groups = 1:10),
+      scales = list(at = c(10, 20, 30)))
+
+r_exp <- reconstruct(s_exp, 
+                      groups = list(Trend = 1))
+plot(r_exp, add.residuals = TRUE, add.original = TRUE,
+     plot.method = "xyplot",
+     superpose = TRUE, auto.key = list(columns = 2))
+```
+
+Ранг ряда - 1.
+
+## Полином
+
+```{r}
+ts_poli <- ts(2 * (1:169) ^2 - 3 * (1:169) + 1)
+s_poli <- ssa(ts_poli, kind = "1d-ssa", svd.method = "svd")
+
+plot(ts_poli)
+plot(s_poli)
+plot(s_poli, type = "vectors", idx = 1:5)
+plot(s_poli, type = "series", groups = list(1, 1:2, 1:3))
+plot(s_poli, type = "paired", idx = 1:3, plot.contrib = FALSE)
+plot(wcor(s_poli, groups = 1:10),
+      scales = list(at = c(10, 20, 30)))
+
+r_poli <- reconstruct(s_poli, 
+                      groups = list(Trend = 1:3))
+plot(r_poli, add.residuals = TRUE, add.original = TRUE,
+     plot.method = "xyplot",
+     superpose = TRUE, auto.key = list(columns = 2))
+s_poli$sigma[1:5]
+```
+
+Ранг ряда - степень полинома + 1.
+
+## Косинус
+
+```{r}
+s_cos <- ssa(ts_cos, kind = "1d-ssa", svd.method = "svd")
+
+plot(ts_cos)
+plot(s_cos)
+plot(s_cos, type = "vectors", idx = 1:3)
+plot(s_exp, type = "series", groups = 1:10)
+plot(s_cos, type = "paired", idx = 1:3, plot.contrib = FALSE)
+plot(wcor(s_cos, groups = 1:10),
+      scales = list(at = c(10, 20, 30)))
+
+r_cos <- reconstruct(s_cos, 
+                      groups = list(Seasonality = 1:2))
+plot(r_cos, add.residuals = TRUE, add.original = TRUE,
+     plot.method = "xyplot",
+     superpose = TRUE, auto.key = list(columns = 2))
+```
+
+Ранг ряда - 2.
+
+## Произведение косинуса и полинома
+
+```{r}
+ts_cos_poli <- ts(cos(2 * pi * (1:169) / 13) * (2 * (1:169) ** 2 - 3 * (1:169) + 1))
+s_cos_poli <- ssa(ts_cos_poli, kind = "1d-ssa", svd.method = "svd")
+
+plot(ts_cos_poli)
+plot(s_cos_poli)
+plot(s_cos_poli, type = "vectors", idx = 1:7)
+plot(s_cos_poli, type = "paired", idx = 1:6, plot.contrib = FALSE)
+plot(wcor(s_cos_poli, groups = 1:10),
+      scales = list(at = c(10, 20, 30)))
+
+r_cos_poli <- reconstruct(s_cos_poli, 
+                      groups = list(Seasonality = 1:6))
+plot(r_cos_poli, add.residuals = TRUE, add.original = TRUE,
+     plot.method = "xyplot",
+     superpose = TRUE, auto.key = list(columns = 2))
+```
+
+Ранг ряда - 2 (косинус) умножить на 3 (полином) = 6.
+
+## Сумма косинусов (точная разделимость)
+
+```{r}
+ts_cos_cos <- ts(cos(2 * pi * (1:143) / 11) + 4 * cos(2 * pi * (1:143) / 13))
+s_cos_cos <- ssa(ts_cos_cos, kind = "1d-ssa", svd.method = "svd")
+
+plot(ts_cos_cos)
+plot(s_cos_cos)
+plot(s_cos_cos, type = "vectors", idx = 1:5)
+plot(s_cos_cos, type = "paired", idx = 1:6, plot.contrib = FALSE)
+plot(wcor(s_cos_cos, groups = 1:10),
+      scales = list(at = c(10, 20, 30)))
+
+r_cos_cos <- reconstruct(s_cos_cos, 
+                      groups = list(Seasonality = 1:4))
+plot(r_cos_cos, add.residuals = TRUE, add.original = TRUE,
+     plot.method = "xyplot",
+     superpose = TRUE, auto.key = list(columns = 2))
+```
+
+Видна точная разделимость. Но если амплитуды равны:
+
+```{r}
+ts_cos_cos_2 <- ts(cos(2 * pi * (1:143) / 11) + cos(2 * pi * (1:143) / 13))
+s_cos_cos_2 <- ssa(ts_cos_cos_2, kind = "1d-ssa", svd.method = "svd")
+
+plot(ts_cos_cos_2)
+plot(s_cos_cos_2)
+plot(s_cos_cos_2, type = "vectors", idx = 1:5)
+plot(s_cos_cos_2, type = "paired", idx = 1:6, plot.contrib = FALSE)
+plot(wcor(s_cos_cos_2, groups = 1:10),
+      scales = list(at = c(10, 20, 30)))
+
+r_cos_cos_2 <- reconstruct(s_cos_cos_2, 
+                      groups = list(Seasonality = 1:4))
+plot(r_cos_cos_2, add.residuals = TRUE, add.original = TRUE,
+     plot.method = "xyplot",
+     superpose = TRUE, auto.key = list(columns = 2))
+```
+
+То точная разделимость пропадает.
+
+## Косинус плюс линейный тренд
+
+```{r}
+ts_cos_lin <- 5 * ts_cos + (1.5 * (1:169) - 2)
+s_cos_lin <- ssa(ts_cos_lin, L = 78, kind = "1d-ssa", svd.method = "svd")
+
+plot(ts_cos_lin)
+plot(s_cos_lin)
+plot(s_cos_lin, type = "vectors", idx = 1:5)
+plot(s_cos_lin, type = "paired", idx = 1:4, plot.contrib = FALSE)
+plot(wcor(s_cos_lin, groups = 1:10),
+      scales = list(at = c(10, 20, 30)))
+
+r_cos_lin <- reconstruct(s_cos_lin, 
+                      groups = list(Trend = 1:2, Seasonality = 3:4))
+plot(r_cos_lin, add.residuals = TRUE, add.original = TRUE,
+     plot.method = "xyplot",
+     superpose = TRUE, auto.key = list(columns = 2))
+```
+
+Теоретически точной разделимости линейного ряда и косинуса нет, но в данном случае длина ряда позволяет разделить их.
+
+## Реальные данные (электричество)
+
+```{r}
+L_electr <- length(ts_electr_2) %/% 2 %/% 12 * 12
+s_electr <- ssa(ts_electr_2, kind = "1d-ssa", svd.method = "svd", L = L_electr)
+
+plot(ts_electr_2)
+plot(s_electr)
+plot(s_electr, type = "vectors", idx = 1:15)
+plot(s_electr, type = "series", groups = list(c(1, 6), c(2:5, 7:8, 9:10)))
+plot(s_electr, type = "paired", idx = 1:15, plot.contrib = FALSE)
+plot(wcor(s_electr, groups = 1:30),
+      scales = list(at = c(10, 20, 30)))
+
+r_electr <- reconstruct(s_electr, 
+                      groups = list(Trend = c(1, 6), Seasonality = c(2:5, 7:8, 9:10)))
+plot(r_electr, add.residuals = TRUE, add.original = TRUE,
+     plot.method = "xyplot",
+     superpose = TRUE, auto.key = list(columns = 2))
+```
+
+```{r}
+spec.pgram(residuals(r_electr), taper = 0, log='no', fast = FALSE, demean = FALSE, detrend = FALSE)
+```
+
+Видно, что осталась какая-то сезонность и тренд, но обнаружить руками это достаточно трудно.
+
+## Автоматическая группировка
+
+Попробуем автоматическую группировку для тренда и сезонности:
+
+```{r}
+coef <- c(1 - 0.02, 1 + 0.02)
+freq.bins.seas = list(trend = 0.05, s12 = 1/12 * coef, s6 = 1/6 * coef,
+                      s4 = 1/4 * coef, s3 = 1/3 * coef,
+                      s2.4 = 1/2.4 * coef, s2 = 1/2 * coef)
+g_electr <- grouping.auto(s_electr, base = "series", 
+                    freq.bins = freq.bins.seas, 
+                    threshold = 0.7, groups = 1:20)
+print(g_electr$trend)
+plot(g_electr, order = TRUE, type = "b")
+r_electr_auto <- reconstruct(s_electr, g_electr)
+plot(r_electr_auto, plot.method = "xyplot", superpose = TRUE, 
+     add.residuals = FALSE)
+```
+
+Видим, что тренд неплохо выделился, но, возможно, немного смешался с сезонностью. А по спектрограмме видно, что нижние и основные частоты были убраны:
+
+```{r}
+spec_electr_auto <- spec.pgram(residuals(r_electr_auto), taper = 0, log='no', fast = FALSE, demean = FALSE, detrend = FALSE, plot = FALSE)
+w.pay <- seq(0, length.out = length(spec_electr$spec), 
+             by = 1/length(ts_electr_2)) 
+xyplot(log(spec_electr$spec) + log(spec_electr_auto$spec) ~ w.pay, 
+       type = "l", xlab = NULL, ylab = NULL)
+```
+
+## Fossa
+
+Применим улучшение разделимости DerivSSA:
+
+```{r}
+plot(s_electr, type = "vectors", idx = 1:20)
+fss_electr <- fossa(s_electr, nested.groups = 1:16, gamma = 10)
+plot(fss_electr, type = "vectors", idx = 1:20)
+plot(fss_electr, type = "series", groups = list(13:16, 1:12))
+coef <- c(1 - 0.02, 1 + 0.02)
+freq.bins.seas = list(trend = 0.05, s12 = 1/12 * coef, s6 = 1/6 * coef,
+                      s4 = 1/4 * coef, s3 = 1/3 * coef,
+                      s2.4 = 1/2.4 * coef, s2 = 1/2 * coef)
+g_electr_fossa <- grouping.auto(fss_electr, base = "series", 
+                    freq.bins = freq.bins.seas, 
+                    threshold = 0.7, groups = 1:20)
+print(g_electr_fossa$trend)
+plot(g_electr_fossa, order = TRUE, type = "b")
+r_electr_auto_fossa <- reconstruct(fss_electr, g_electr_fossa)
+plot(r_electr_auto_fossa, plot.method = "xyplot", superpose = TRUE, 
+     add.residuals = FALSE)
+```
+
+Немного лучше, но идеально не стало.
+
+# SSA с проекциями
+
+Смоделируем полиномиальный ряд со степенью $4$:
+
+```{r}
+N_poli_4 <- 239
+freq_12 <- 12
+poli_trend <- 3 * ((1:N_poli_4) / 100) ** 4 - 5.5 * ((1:N_poli_4) / 100) ** 3 - 3 * ((1:N_poli_4) / 100) ** 2 + 1.5 * ((1:N_poli_4) / 100) + 15
+ts_poli_4_poli <- ts(poli_trend, frequency = freq_12)
+ts_poli_4 <- ts(poli_trend + 3 * cos(2 * pi * (1:N_poli_4) / freq_12 + pi / 3) + rnorm(N_poli_4), frequency = freq_12)
+plot(ts_poli_4)
+```
+
+Попробуем выделить тренд обычным SSA:
+
+```{r}
+L_poli_4 <- N_poli_4 %/% 2 %/% 12 * 12
+s_poli_4 <- ssa(ts_poli_4, kind = "1d-ssa", svd.method = "svd", L = L_poli_4)
+
+plot(s_poli_4)
+plot(s_poli_4, type = "vectors", idx = 1:8)
+plot(s_poli_4, type = "series", groups = list(c(1, 2, 5), c(3, 4)))
+plot(wcor(s_poli_4, groups = 1:10),
+      scales = list(at = c(10, 20, 30)))
+
+r_poli_4 <- reconstruct(s_poli_4, 
+                      groups = list(Trend = c(1, 2, 5), Seasonality = c(3, 4)))
+plot(r_poli_4, add.residuals = TRUE, add.original = TRUE,
+     plot.method = "xyplot",
+     superpose = TRUE, auto.key = list(columns = 2))
+```
+
+Видим, что тренд смешался с сезонностью или шумом. Теперь попробуем применить SSA с проекциями:
+
+```{r}
+r <- 4
+s_poli_4_proj <- ssa(ts_poli_4, L = L_poli_4, column.projector = 3, row.projector = 2)
+r_poli_4_proj <- reconstruct(s_poli_4_proj, groups = 
+                      list(Trend = seq_len(nspecial(s_poli_4_proj))))
+fit_poli_4 <- ts(r_poli_4_proj$Trend, frequency = 12)
+fit_poli_4_reg <- ts(predict(lm(fit_poli_4 ~ poly((1:length(ts_poli_4)), r, raw = TRUE))), frequency = 12)
+
+plot(ts_poli_4)
+lines(ts_poli_4_poli, col = "red")
+lines(fit_poli_4, col = "blue")
+lines(fit_poli_4_reg, col = "green")
+legend(x = "top", c("original", "poly reg", "SSA proj", "SSA proj reg"), col = c("black", "red", "blue", "green"), lty = 1, lwd = 1)
+```
+
+Видим, что тренд действительно намного лучше выделился и почти совпал с реальным трендом.
+
+## Реальные данные (электричество)
+
+Мы видели, что тренд ряда по электричеству неплохо аппроксимировался 4-ой степенью. Попробуем тогда применить SSA с проекциями для выделения полиномиального тренда:
+
+```{r}
+r <- 4
+s_electr_proj <- ssa(ts_electr_2, L = L_electr, column.projector = 3, row.projector = 2)
+r_electr_proj <- reconstruct(s_electr_proj, groups = 
+                      list(Trend = seq_len(nspecial(s_electr_proj))))
+fit_electr <- ts(r_electr_proj$Trend, frequency = 12)
+fit_electr_reg <- ts(predict(lm(fit_electr ~ poly((1:length(ts_electr_2)), r, raw = TRUE))), frequency = 12)
+
+plot(ts_electr_2)
+lines(ts_electr_poly, col = "red")
+lines(fit_electr, col = "blue")
+lines(fit_electr_reg, col = "green")
+legend(x = "bottomright", c("original", "poly reg", "SSA proj", "SSA proj reg"), col = c("black", "red", "blue", "green"), lty = 1, lwd = 1)
+```
+
+
+# SSA как линейный фильтр
+
+Функция, вычисляющая коэффициенты линейного фильтра на основе SSA:
+
+```{r}
+make_filter_ssa <- function(u, L) {
+  k <- length(u)
+  
+  mat1 <- t(matrix(rep(u[1:L], each = L), nrow = L))
+  mat2 <- matrix(0, nrow = L, ncol = L)
+  for (j in 0:(L - 1)) {
+    mat2[j + 1, ] <- c(u[(j + 1):L], rep(0, j))
+  }
+  
+  res <- colSums(mat1 * mat2)
+  
+  c(rev(res[-1]), res) / L
+}
+```
+
+В результате, если взять точки от $L$ до $N - L + 1$, то получим нужный результат:
+
+```{r}
+L <- 26
+N <- 169
+freq <- 13
+
+s_cos_lin <- ssa(ts_cos_lin, L = L, kind = "1d-ssa", svd.method = "svd")
+ts_cos_lin_filter_sum <- ts(rep(0, N), frequency = freq)
+color_plot <- c("red", "blue", "green", "purple")
+
+plot(ts_cos_lin)
+
+for (i in 1:4) {
+  u <- s_cos_lin$U[, i]
+  filter_ssa <- make_filter_ssa(u, L)
+  ts_cos_lin_filter <- ts(filter_continue(ts_cos_lin, filter_ssa, FALSE), frequency = freq)
+  ts_cos_lin_filter_sum <- ts_cos_lin_filter_sum + ts_cos_lin_filter
+  lines(ts_cos_lin_filter, col = color_plot[i])
+}
+
+lines(ts_cos_lin_filter_sum, col = "orange")
+abline(v = (N - L) / freq + 1, col = "gray", lty = 2)
+abline(v = L / freq + 1, col = "gray", lty = 2)
+legend(x = "topleft", c("original", "1", "2", "3", "4", "sum"), col = c("black", color_plot, "orange"), lty = 1, lwd = 1)
+```
+
+Посмотрим на АЧХ фильтра SSA для синуса при разных $L$:
+
+```{r}
+L_vec <- c(13, 26, 39, 52)
+freq <- seq(0, pi, 0.001)
+omega <- freq/2/pi
+u <- ssa(ts_cos_lin, L = L_vec[1], kind = "1d-ssa", svd.method = "svd")$U[, 3]
+plot(omega, afc(make_filter_ssa(u, L_vec[1]), freq), type = "l", ylab = "Frequency response")
+u <- ssa(ts_cos_lin, L = L_vec[2], kind = "1d-ssa", svd.method = "svd")$U[, 3]
+lines(omega, afc(make_filter_ssa(u, L_vec[2]), freq), type = "l", col = "red")
+u <- ssa(ts_cos_lin, L = L_vec[3], kind = "1d-ssa", svd.method = "svd")$U[, 3]
+lines(omega, afc(make_filter_ssa(u, L_vec[3]), freq), type = "l", col = "blue")
+u <- ssa(ts_cos_lin, L = L_vec[4], kind = "1d-ssa", svd.method = "svd")$U[, 3]
+lines(omega, afc(make_filter_ssa(u, L_vec[4]), freq), type = "l", col = "green")
+legend(x="topright", c("L = 13", "L = 26", "L = 39", "L = 52"), col = c("black", "red", "blue", "green"), lty = 1, lwd = 1)
+```
+
+# Построение огибающей
+
+Амплитуда, модулированная косинусом с большим периодом:
+
+```{r}
+ts_cos_cos_long <- ts(cos(2 * pi * (1:197) / 100) * cos(2 * pi * (1:197) / 6))
+plot(ts_cos_cos_long)
+ts_cos_cos_sq <- 2 * ts_cos_cos_long ** 2
+plot(ts_cos_cos_sq)
+
+s_cos_cos_sq <- ssa(ts_cos_cos_sq, L = 96, kind = "1d-ssa", svd.method = "svd")
+
+plot(s_cos_cos_sq)
+plot(s_cos_cos_sq, type = "vectors", idx = 1:10)
+plot(s_cos_cos_sq, type = "series", groups = list(c(1, 2, 5)))
+plot(wcor(s_cos_cos_sq, groups = 1:10),
+      scales = list(at = c(10, 20, 30)))
+
+r_cos_cos_sq <- reconstruct(s_cos_cos_sq, 
+                      groups = list(Trend = c(1, 2, 5)))
+plot(r_cos_cos_sq, add.residuals = TRUE, add.original = TRUE,
+     plot.method = "xyplot",
+     superpose = TRUE, auto.key = list(columns = 2))
+plot(ts_cos_cos_long)
+lines(sqrt(r_cos_cos_sq$Trend))
+```
+
+Амплитуда --- корень:
+
+```{r}
+ts_cos_sqrt <- ts(sqrt(1:197) * cos(2 * pi * (1:197) / 6))
+plot(ts_cos_sqrt)
+ts_cos_sqrt_sq <- 2 * ts_cos_sqrt ** 2
+plot(ts_cos_sqrt_sq)
+
+s_cos_sqrt_sq <- ssa(ts_cos_sqrt_sq, L = 96, kind = "1d-ssa", svd.method = "svd")
+
+plot(s_cos_sqrt_sq)
+plot(s_cos_sqrt_sq, type = "vectors", idx = 1:10)
+plot(s_cos_sqrt_sq, type = "series", groups = list(c(1, 4)))
+plot(wcor(s_cos_sqrt_sq, groups = 1:10),
+      scales = list(at = c(10, 20, 30)))
+
+r_cos_sqrt_sq <- reconstruct(s_cos_sqrt_sq, 
+                      groups = list(Trend = c(1, 4)))
+plot(r_cos_sqrt_sq, add.residuals = TRUE, add.original = TRUE,
+     plot.method = "xyplot",
+     superpose = TRUE, auto.key = list(columns = 2))
+plot(ts_cos_sqrt)
+lines(sqrt(r_cos_sqrt_sq$Trend))
+```
+
+# Выделение гетерогедостичности
+
+```{r}
+N <- 300
+sigma <- (5 + 3 * sin(2 * pi * (1:N) / 100))
+ts_getero_noise <- ts(sigma * rnorm(N))
+plot(ts_getero_noise)
+lines(sigma)
+ts_getero_noise_sq <- ts_getero_noise ** 2
+plot(ts_getero_noise_sq)
+
+s_getero_noise_sq <- ssa(ts_getero_noise_sq, kind = "1d-ssa", svd.method = "svd")
+
+plot(s_getero_noise_sq)
+plot(s_getero_noise_sq, type = "vectors", idx = 1:10)
+plot(s_getero_noise_sq, type = "series", groups = list(c(1, 2, 3)))
+plot(wcor(s_getero_noise_sq, groups = 1:10),
+      scales = list(at = c(10, 20, 30)))
+
+r_getero_noise_sq <- reconstruct(s_getero_noise_sq, 
+                      groups = list(Trend = c(1, 2, 3)))
+plot(r_getero_noise_sq, add.residuals = TRUE, add.original = TRUE,
+     plot.method = "xyplot",
+     superpose = TRUE, auto.key = list(columns = 2))
+rebuild_sigma <- sqrt(r_getero_noise_sq$Trend)
+plot(ts_getero_noise)
+lines(rebuild_sigma, col = "blue")
+lines(-rebuild_sigma, col = "blue")
+lines(2 * rebuild_sigma, col = "red")
+lines(-2 * rebuild_sigma, col = "red")
+```
+
+# Box-Cox transformation
+
+Для реального ряда электричества мы получаем, что параметр Box-cox преобразования очень близок к $0.5$, что похоже на пуассоновский шум:
+
+```{r}
+lambda <- BoxCox.lambda(ts_electr_2, method = "guerrero")
+print(lambda)
+```
+
+```{r}
+ts_electr_transform <- BoxCox(ts_electr_2, lambda)
+plot(ts_electr_transform, type = "l")
+s_electr_transform <- ssa(ts_electr_transform, kind = "1d-ssa", svd.method = "svd")
+
+plot(s_electr_transform)
+plot(s_electr_transform, type = "vectors", idx = 1:12)
+plot(wcor(s_electr_transform, groups = 1:10),
+      scales = list(at = c(10, 20, 30)))
+
+r_electr_transform <- reconstruct(s_electr_transform, 
+                      groups = list(Trend = c(1, 6), Seasonality = c(2:5, 7:10)))
+plot(r_electr_transform, add.residuals = TRUE, add.original = TRUE,
+     plot.method = "xyplot",
+     superpose = TRUE, auto.key = list(columns = 2))
+trend_electr_transform <- InvBoxCox(r_electr_transform$Trend, lambda)
+plot(ts_electr_2)
+lines(trend_electr_transform, col = "red")
+lines(r_electr$Trend, col = "blue")
+legend(x = "bottomright", legend = c("SSA + BC", "SSA"), lty = 1, col = c("red", "blue"))
+```
+
+Большой разницы нет.
+
+# Сравнение всех фильтров
+
+Тренд, полученный SSA, усреднением, аппроксимацией, loess и т.д.:
+
+```{r fig.height=8, fig.width=10}
+plot(ts_electr_2)
+lines(r_electr$Trend, col="red")
+lines(r_electr_auto$trend, col="orange")
+lines(r_electr_auto_fossa$trend, col="tomato4")
+lines(fit_electr_reg, col="darkcyan")
+lines(ts_electr_2_filter_24_2, col="blue")
+lines(ts_electr_poly, col="green")
+lines(ts_electr_loess_50, col="purple")
+lines(ts_electr_hp_1, col="aquamarine")
+legend(x = "bottomright", legend = c("SSA", "SSA auto", "FOSSA", "SSA poly reg", "Filter", "Polinom", "Loess", "HP"), lty = 1, col = c("red", "orange", "tomato4", "darkcyan", "blue", "green", "purple", "aquamarine"))
+```
+
+# Линейные реккурентные формулы
+
+## Числа Фибоначчи (ЛРФ из ряда)
+
+Смоделируем ряд Фибоначчи Линейной реккурентной формулой:
+
+```{r}
+lrr_generate <- function(coef, first_members, n) {
+  res <- c(first_members)
+  k <- length(coef)
+  
+  for (i in (k + 1):n) {
+    res <- c(res, sum(res[(i - k):(i - 1)] * coef))
+  }
+  
+  res
+}
+```
+
+```{r}
+N_fib <- 10
+first_members_fib <- c(1, 1)
+coef_fib <- c(1, 1)
+fb_series <- lrr_generate(coef_fib, first_members_fib, N_fib)
+cat("Fibonacci original series: ", fb_series, "\n")
+```
+
+Теперь попробуем обратно из ряда получить коэффициенты ЛРФ. Для чего сначала составим траекторную матрицу:
+
+```{r}
+create_tr_matrix <- function(series, L) {
+  N <- length(series)
+  K <- N - L + 1
+  X <- matrix(nrow = L, ncol = K)
+
+  for (i in 1:L) {
+    for (j in 1:K) {
+      X[i, j] <- series[j + i - 1]
+    }
+  }
+  
+  X
+}
+```
+
+```{r}
+L_fib <- 5
+X_fib <- create_tr_matrix(fb_series, L = L_fib)
+X_fib
+```
+
+Наконец найдём вектор $B$ (ортогональный пространству столбцов матрицы, и последний элемент который равен $-1$):
+
+```{r}
+find_min_norm_null_vector <- function(X) {
+  X <- t(X)
+  svd_res <- svd(X)
+  V <- svd_res$v
+  small_singular <- which(svd_res$d < sqrt(.Machine$double.eps))
+
+  if (length(small_singular) == 0) {
+    stop("У матрицы нет ненулевого нулевого пространства")
+  }
+
+  Null_basis <- V[, small_singular, drop = FALSE]
+
+  dim_null <- ncol(Null_basis)
+
+  Dmat <- t(Null_basis) %*% Null_basis
+  dvec <- rep(0, dim_null)
+
+  Aeq <- matrix(0, nrow = 1, ncol = dim_null)
+  Aeq[1, ] <- Null_basis[nrow(Null_basis), ]
+  beq <- -1
+
+  sol <- solve.QP(Dmat, dvec, t(Aeq), beq, meq = 1)
+
+  B <- Null_basis %*% sol$solution
+
+  B
+}
+```
+
+```{r}
+B_fib <- find_min_norm_null_vector(X_fib)
+cat("B:\n")
+print(B_fib)
+```
+
+Проверим насколько эти коэффициенты соответствуют нашему ряду:
+
+```{r}
+coef_fib_re <- B_fib[1:(length(B_fib) - 1)]
+fb_series_re <- lrr_generate(coef_fib_re, fb_series[1:length(coef_fib_re)], N_fib)
+cat("Fibonacci restored series: ", fb_series_re, "\n")
+```
+
+Соответствуют полностью!
+
+## Числа Фибоначчи (явная формула из ЛРФ)
+
+Используем характеристические функции для поиска явной формулы ряда:
+
+```{r}
+cluster_complex_numbers <- function(values, epsilon = 1e-4) {
+  n <- length(values)
+  adj_matrix <- matrix(0, n, n)
+
+  if (n > 1) {
+    for (i in 1:(n - 1)) {
+      for (j in (i+1):n) {
+        if (Mod(values[i] - values[j]) <= epsilon) {
+          adj_matrix[i, j] <- 1
+          adj_matrix[j, i] <- 1
+        }
+      }
+    } 
+  }
+
+  g <- graph_from_adjacency_matrix(adj_matrix, mode = "undirected")
+  clusters <- components(g)$membership
+
+  unique_clusters <- unique(clusters)
+  results <- list()
+
+  for (cl in unique_clusters) {
+    group_values <- values[clusters == cl]
+    mean_value <- mean(group_values)
+    group_size <- length(group_values)
+    
+    results <- append(results, list(list(mean = mean_value, size = group_size)))
+  }
+
+  return(results)
+}
+
+find_explicit_formula <- function(coeffs, initial_terms) {
+  k <- length(coeffs)
+  poly_roots <- polyroot(c(-coeffs, 1))
+  roots_group <- cluster_complex_numbers(poly_roots)
+  
+  basis <- matrix(0, nrow = k, ncol = k)
+  
+  for (i in 1:k) {
+    t <- 1
+    
+    for (elem in roots_group) {
+      roots_group_size <- elem$size
+      roots_group_mean <- elem$mean
+      
+      for (l in 1:roots_group_size) {
+        basis[i, t] <- i ** (l - 1) * roots_group_mean ** i
+        t <- t + 1
+      }
+    }
+  }
+  
+  A <- ginv(basis) %*% initial_terms
+  
+  t <- 1
+  
+  for (j in 1:length(roots_group)) {
+    roots_group_size <- roots_group[[j]]$size
+    
+    roots_group[[j]]$coef <- A[t:(t + roots_group_size - 1)]
+    t <- t + roots_group_size
+  }
+  
+  roots_group
+}
+```
+
+```{r}
+list_formula_fib <- find_explicit_formula(coef_fib, first_members_fib)
+list_formula_fib
+```
+
+Как это выглядит в виде математической формулы:
+
+```{r}
+round_complex <- function(x, digits = 4) {
+  round(Re(x), digits) + round(Im(x), digits) * 1i
+}
+
+create_str_formula <- function(list_formula) {
+  res <- "x _n = "
+  first_plus <- TRUE
+  
+  for (elem in list_formula) {
+    if (first_plus) {
+      first_plus <- FALSE
+    } 
+    else {
+      res <- paste(res, " + ", sep = "")
+    }
+    
+    list_formula_size <- elem$size
+    list_formula_mean <- elem$mean
+    list_formula_coef <- elem$coef
+    
+    res <- paste(res, "(", sep = "")
+    
+    for (i in 1:list_formula_size) {
+      if (i != 1) {
+        res <- paste(res, " + ", sep = "")
+      }
+      res <- paste(res, "(", toString(round_complex(list_formula_coef[i])), ")", sep = "")
+      
+      if (i != 1){
+        res <- paste(res, " * n", sep = "")
+      }
+      
+      if (i > 2) {
+        res <- paste(res, " ^(", toString(i - 1), ")", sep = "")
+      }
+    }
+    
+    res <- paste(res, ") * (", toString(round_complex(list_formula_mean)), ") ^n", sep = "")
+  }
+  
+  res
+}
+```
+
+```{r}
+create_str_formula(list_formula_fib)
+```
+
+Наконец, заново смоделируем числа Фибоначчи с помощью явной формулы:
+
+```{r}
+model_elem_by_formula <- function(list_formula, n) {
+  res <- 0
+  
+  for (elem in list_formula) {
+    list_formula_size <- elem$size
+    list_formula_mean <- elem$mean
+    list_formula_coef <- elem$coef
+    
+    brace_sum <- 0
+    
+    for (i in 1:list_formula_size) {
+      brace_sum <- brace_sum + list_formula_coef[i] * n ** (i - 1)
+    }
+    
+    res <- res + brace_sum * list_formula_mean ** n
+  }
+  
+  res
+}
+
+model_series_by_formula <- function(list_formula, size) {
+  res <- c()
+  
+  for (i in 1:size) {
+    res <- c(res, Re(model_elem_by_formula(list_formula, i)))  
+  }
+  
+  res
+}
+```
+
+```{r}
+fb_series_formula <- model_series_by_formula(list_formula_fib, N_fib)
+fb_series_formula
+```
+
+## Косинус
+
+Сделаем то же самое с косинусом:
+
+```{r}
+N_cos <- 10
+cos_series_orig <- cos(2 * pi * (1:N_cos) / freq_12)
+first_members_cos <- c(cos(2 * pi / freq_12), cos(4 * pi / freq_12))
+coef_cos <- c(-1, 2 * cos(2 * pi / freq_12))
+coef_cos
+cos_series <- lrr_generate(coef_cos, first_members_cos, N_cos)
+list_formula_cos <- find_explicit_formula(coef_cos, first_members_cos)
+create_str_formula(list_formula_cos)
+cos_series_formula <- model_series_by_formula(list_formula_cos, N_cos)
+```
+
+```{r}
+L_cos <- 5
+X_cos <- create_tr_matrix(cos_series, L = L_cos)
+X_cos
+B_cos <- find_min_norm_null_vector(X_cos)
+cat("B:\n")
+print(B_cos)
+coef_cos_re <- B_cos[1:(length(B_cos) - 1)]
+cos_series_re <- lrr_generate(coef_cos_re, cos_series[1:length(coef_cos_re)], N_cos)
+cat("Cos restored series: ", cos_series_re, "\n")
+```
+
+```{r}
+plot(cos_series_orig, type = "l", col = "red")
+lines(cos_series, lty = 2, lwd = 2, col = "blue")
+lines(cos_series_re, lty = 6, lwd = 2, col = "purple")
+lines(cos_series_formula, lty = 3, lwd = 2, col = "green")
+legend(x="top", legend = c("original", "lrr_generate", "restored", "formula"), lty = c(1, 2, 6, 3), col = c("red", "blue", "purple", "green"))
+```
+
+## Ранг конечного ряда
+
+Сгенерируем сложный ряд с экспонентой, полиномом и косинусом:
+
+```{r}
+N_epc <- 30
+epc_series <- exp(2 * (1:N_epc) / N_epc) * (2 *(2 * (1:N_epc) / N_epc) ** 2 - 3 * (2 * (1:N_epc) / N_epc) + 6) * cos(2 * pi * (1:N_epc) / freq_12 + pi / 3)
+epc_series
+```
+
+Найдём ЛРФ этого ряда:
+
+```{r}
+L_epc <- 7
+X_epc <- create_tr_matrix(epc_series, L = L_epc)
+B_epc <- find_min_norm_null_vector(X_epc)
+cat("B:\n")
+print(B_epc)
+coef_epc_re <- B_epc[1:(length(B_epc) - 1)]
+first_members_epc <- epc_series[1:length(coef_epc_re)]
+epc_series_re <- lrr_generate(coef_epc_re, first_members_epc, N_epc)
+cat("Restored series: ", epc_series_re, "\n")
+```
+
+А теперь по ЛРФ найдём обратно явную формулу:
+
+```{r}
+list_formula_epc <- find_explicit_formula(coef_epc_re, first_members_epc)
+create_str_formula(list_formula_epc)
+epc_series_formula <- model_series_by_formula(list_formula_epc, N_epc)
+```
+
+Видим, что всё совпадает:
+
+```{r}
+plot(epc_series, type = "l", col = "red")
+lines(epc_series_re, lty = 6, lwd = 2, col = "purple")
+lines(epc_series_formula, lty = 3, lwd = 2, col = "green")
+legend(x="top", legend = c("original", "lrr_generate", "formula"), lty = c(1, 6, 3), col = c("red", "purple", "green"))
+```
+
+## SSA lrr
+
+До этого найденные формулы имели комплексные числа в своей записи, хотя выдавали вещественные результаты, то есть по сути своей составляли вещественные выражения в комплексных значениях. Перепишим прошлые функции так, чтобы они выдавали суммы произведений косинусов, степеней и полиномов.
+
+Функция кластеризации комплексных чисел почти не изменилась:
+
+```{r}
+cluster_complex_numbers_conj <- function(values, epsilon = 1e-3) {
+  n <- length(values)
+  adj_matrix <- matrix(0, n, n)
+
+  if (n > 1) {
+    for (i in 1:(n - 1)) {
+      for (j in (i+1):n) {
+        if (Mod(values[i] - values[j]) / max(Mod(values[i]), abs(Mod(values[j]))) <= epsilon) {
+          adj_matrix[i, j] <- 1
+          adj_matrix[j, i] <- 1
+        }
+      }
+    } 
+  }
+
+  g <- graph_from_adjacency_matrix(adj_matrix, mode = "undirected")
+  clusters <- components(g)$membership
+
+  unique_clusters <- unique(clusters)
+  results <- list()
+
+  for (cl in unique_clusters) {
+    group_values <- values[clusters == cl]
+    mean_value <- mean(group_values)
+    group_size <- length(group_values)
+    mod_value <- Mod(mean_value)
+    arg_value <- Arg(mean_value)
+    period_value <- 2 * pi / arg_value
+    
+    results <- append(results, list(list(mean = mean_value,
+                                         period = period_value,
+                                         arg = arg_value,
+                                         mod = mod_value,
+                                         size = group_size)))
+  }
+
+  results$type <- "raw"
+  results
+}
+```
+
+В функции нахождения явной формулы изменим нахождение корней через polyroot на метод ssa, а также для периодик перепишим нахождение коэффициентов:
+
+```{r}
+find_roots_simple <- function(series) {
+  len_series <- length(series)
+  s_series_pre <- ssa(series, L = len_series %/% 2, svd.method = "svd")
+  r <- sum(s_series_pre$sigma > sqrt(.Machine$double.eps))
+  s_series <- ssa(series, L = r + 1, svd.method = "svd")
+  
+  l_series <- lrr(s_series, groups = list(1:r))
+  
+  roots(l_series)
+}
+
+find_explicit_formula_conj <- function(series, roots = c(), epsilon = 1e-3) {
+  len_series <- length(series)
+  
+  if (length(roots) == 0)
+    roots_series <- find_roots_simple(series)
+  else
+    roots_series <- roots
+  
+  r <- length(roots_series)
+  
+  roots_group <- cluster_complex_numbers_conj(roots_series, epsilon)
+  basis <- matrix(0, nrow = len_series, ncol = r)
+  
+  first_to_len <- 1:len_series
+  t <- 1
+    
+  for (i in 1:(length(roots_group) - 1)) {
+    elem <- roots_group[[i]]
+    roots_group_size <- elem$size
+    roots_group_mod <- elem$mod
+    roots_group_period <- elem$period
+    
+    if (roots_group_period > 1e16)
+      powers <- roots_group_mod ** first_to_len
+    else if (roots_group_period == 2)
+      powers <- (-roots_group_mod) ** first_to_len
+    else if (roots_group_period > 0)
+      powers <- roots_group_mod ** first_to_len * sin(2 * pi * first_to_len / roots_group_period)
+    else
+      powers <- roots_group_mod ** first_to_len * cos(2 * pi * first_to_len / roots_group_period)
+      
+    for (l in 1:roots_group_size) {
+      basis[first_to_len, t] <- first_to_len ** (l - 1) * powers
+      t <- t + 1
+    }
+  }
+  
+  A <- lm(series ~ 0 + basis)
+  A <- A$coefficients
+  names(A) <- c()
+  
+  t <- 1
+  
+  for (j in 1:(length(roots_group) - 1)) {
+    roots_group_size <- roots_group[[j]]$size
+    
+    roots_group[[j]]$coef <- A[t:(t + roots_group_size - 1)]
+    t <- t + roots_group_size 
+  }
+  
+  roots_group
+}
+```
+
+Аналогичные изменения периодик внесём в функции нахождения строки и моделирования ряда:
+
+```{r}
+create_str_formula_conj <- function(list_formula, digits = 4) {
+  res <- "x _n = "
+  first_plus <- TRUE
+  
+  for (i in 1:(length(list_formula) - 1)) {
+    elem <- list_formula[[i]]
+    if (first_plus) {
+      first_plus <- FALSE
+    } 
+    else {
+      res <- paste(res, " + ", sep = "")
+    }
+    
+    list_formula_coef <- elem$coef
+    list_formula_size <- elem$size
+    list_formula_mod <- elem$mod
+    list_formula_period <- elem$period
+    
+    res <- paste(res, "(", sep = "")
+    
+    for (i in 1:list_formula_size) {
+      if (i != 1) {
+        res <- paste(res, " + (", sep = "")
+      }
+      res <- paste(res, toString(round(list_formula_coef[i], digits)), sep = "")
+      
+      if (i != 1){
+        res <- paste(res, ") * n", sep = "")
+      }
+      
+      if (i > 2) {
+        res <- paste(res, " ^(", toString(i - 1), ")", sep = "")
+      }
+    }
+    
+    if (abs(list_formula_period) > 1e16)
+      res <- paste(res, ") * ", toString(round(list_formula_mod, digits)), " ^n", sep = "")
+    else if (list_formula_period == 2)
+      res <- paste(res, ") * (", toString(-round(list_formula_mod, digits)), ") ^n", sep = "")
+    else {
+      res <- paste(res, ") * ", sep = "")
+      
+      if (round(list_formula_mod, digits) != 1) {
+        res <- paste(res, toString(round(list_formula_mod, digits))," ^n * ", sep = "")
+      }
+      
+      if (list_formula_period > 0) {
+        if (list_formula$type == "raw") {
+          res <- paste(res, "sin(2 * pi * n / ", toString(round(list_formula_period, digits)), ")", sep = "")
+        }
+        else if (list_formula$type == "compressed") {
+          res <- paste(res, "cos(2 * pi * n / ", toString(round(list_formula_period, digits)), " + (", toString(round(elem$phi, digits)), "))", sep = "")
+        }
+      }
+      else
+        res <- paste(res, "cos(2 * pi * n / ", toString(abs(round(list_formula_period, digits))), ")", sep = "")
+    }
+  }
+  
+  res
+}
+
+model_elem_by_formula_conj <- function(list_formula, n) {
+  res <- 0
+  
+  for (i in 1:(length(list_formula) - 1)) {
+    elem <- list_formula[[i]]
+    list_formula_coef <- elem$coef
+    list_formula_size <- elem$size
+    list_formula_mod <- elem$mod
+    list_formula_period <- elem$period
+    
+    brace_sum <- 0
+    
+    for (i in 1:list_formula_size) {
+      brace_sum <- brace_sum + list_formula_coef[i] * n ** (i - 1)
+    }
+    
+    if (abs(list_formula_period) > 1e16)
+      res <- res + brace_sum * list_formula_mod ** n
+    else if (list_formula_period == 2)
+    res <- res + brace_sum * (-list_formula_mod) ** n
+    else if (list_formula_period > 0) {
+      if (list_formula$type == "raw") {
+        res <- res + brace_sum * list_formula_mod ** n * sin(2 * pi * n / list_formula_period)
+      }
+      else if (list_formula$type == "compressed") {
+        res <- res + brace_sum * list_formula_mod ** n * cos(2 * pi * n / list_formula_period + elem$phi)
+      }
+    }
+    else
+      res <- res + brace_sum * list_formula_mod ** n * cos(2 * pi * n / list_formula_period)
+  }
+  
+  res
+}
+
+model_series_by_formula_conj <- function(list_formula, size) {
+  res <- c()
+  
+  for (i in 1:size) {
+    res <- c(res, Re(model_elem_by_formula_conj(list_formula, i)))  
+  }
+  
+  res
+}
+```
+
+Функция нахождения явной формулы не объединяет синусы и косинусы с одинаковым периодом, поэтому сделаем это в отдельной формуле:
+
+```{r}
+compress_sincos_to_cos <- function(list_formula) {
+  list_formula_cos <- list()
+  
+  for (i in 1:(length(list_formula) - 1)) {
+    elem <- list_formula[[i]]
+    period <- elem$period
+    coef <- elem$coef[1]
+    
+    if (elem$period < 0 & elem$period > -1e16) {
+      for (j in 1:(length(list_formula) - 1)) {
+        elem1 <- list_formula[[j]]
+        
+        if (abs(abs(period) - elem1$period) < 1e-8) {
+          coef1 <- elem1$coef[1]
+          phi <- -atan2(coef1, coef)
+          coef_new <- elem$coef / cos(phi)
+          
+          list_formula_cos <- append(list_formula_cos, list(list(mean = elem$mean,
+                                                                 period = abs(period),
+                                                                 arg = elem$arg,
+                                                                 mod = elem$mod,
+                                                                 size = elem$size,
+                                                                 coef = coef_new,
+                                                                 phi = phi)))
+        }
+      }
+    }
+    else if (elem$period == 2 | abs(elem$period) > 1e16) {
+      list_formula_cos <- append(list_formula_cos, list(list(mean = elem$mean,
+                                                             period = period,
+                                                             arg = elem$arg,
+                                                             mod = elem$mod,
+                                                             size = elem$size,
+                                                             coef = elem$coef,
+                                                             phi = 0)))
+    }
+  }
+  
+  list_formula_cos$type <- "compressed"
+  list_formula_cos
+}
+```
+
+В качестве примера рассмотрим прошлый сложный ряд и ещё прибавим к нему косинус с другим периодом и смещением:
+$$
+x _n = (6 - 0.2 n + 0.0089 n ^2) \cdot e ^{2n / 30} \cos(2 \pi n / 12 + \pi / 3) + \cos(2 \pi n / 5 - \pi / 4)
+$$
+
+```{r}
+epc_sin_series <- epc_series + cos(2 * pi * (1:N_epc) / 5 - pi / 4)
+plot(epc_sin_series, type = "l")
+```
+
+Найдём явную формулу в виде списка параметров:
+
+```{r}
+list_formula_epc_sin <- find_explicit_formula_conj(epc_sin_series)
+list_formula_epc_sin
+create_str_formula_conj(list_formula_epc_sin)
+```
+
+И сократим запись убрав синусы и добавив смещение:
+
+```{r}
+list_formula_epc_sin_comp <- compress_sincos_to_cos(list_formula_epc_sin)
+list_formula_epc_sin_comp
+create_str_formula_conj(list_formula_epc_sin_comp)
+```
+
+Полученная формула аналогична оригинальной. По найденной формуле построим ряд и сравним с оригиналом:
+
+```{r}
+epc_sin_series_formula <- model_series_by_formula_conj(list_formula_epc_sin_comp, N_epc)
+plot(epc_sin_series, type = "l", col = "red")
+lines(epc_sin_series_formula, lty = 3, lwd = 2, col = "green")
+legend(x="bottom", legend = c("original", "formula (compressed)"), lty = c(1, 3), col = c("red", "green"))
+```
+
+Как и ожидалось, они совпадают.
+
+## LRR с шумом
+
+Давайте внесём немного шума в ряд. Для этого возьмём для начала ряд косинуса плюс экспонента:
+
+```{r}
+N_cos_long <- 100
+cos_series_long <- exp(2 * (1:N_cos_long) / N_cos_long) + cos(2 * pi * (1:N_cos_long) / 12 + pi / 3)
+plot(cos_series_long, type = "l")
+```
+
+Внесём шум:
+
+```{r}
+cos_series_long_noise <- cos_series_long + rnorm(N_cos_long, 0, 1)
+plot(cos_series_long_noise, type = "l")
+```
+
+Посмотрим, что выдаст прошлый алгоритм. Но в первую очередь на вывод lrr после того как мы передадим ему ряд с группами найденного сигнала:
+
+```{r}
+L_cos_long <- (N_cos_long %/% 2) %/% 12 * 12
+s_cos_series_long_noise <- ssa(cos_series_long_noise, L = L_cos_long, svd.method = "svd")
+plot(s_cos_series_long_noise, type = "vectors", idx = 1:10)
+plot(s_cos_series_long_noise, type = "series", groups = list(c(1, 2, 3)))
+plot(wcor(s_cos_series_long_noise, groups = 1:10),
+      scales = list(at = c(10, 20, 30)))
+
+r_cos_series_long_noise <- reconstruct(s_cos_series_long_noise, 
+                      groups = list(Trend = 1, Seasonality = c(2, 3)))
+plot(r_cos_series_long_noise, add.residuals = TRUE, add.original = TRUE,
+     plot.method = "xyplot",
+     superpose = TRUE, auto.key = list(columns = 2))
+l_cos_series_long_noise <- lrr(s_cos_series_long_noise, groups = list(1:3))
+
+plot(l_cos_series_long_noise)
+```
+
+Видим очень много корней, но есть те которые выделяются на фоне других. С помощью функции parestimate мы можем найти сигнальные корни из всех остальных:
+
+```{r}
+par_cos_long_noise <- parestimate(s_cos_series_long_noise, groups = list(1:3), method = "esprit")
+par_cos_long_noise
+```
+
+Осталось только передать эти корни в нашу функцию (которую, правда, надо под это переделать):
+
+```{r}
+list_formula_cos_long_noise <- find_explicit_formula_conj(cos_series_long_noise, roots = par_cos_long_noise$roots)
+list_formula_cos_long_noise_comp <- compress_sincos_to_cos(list_formula_cos_long_noise)
+create_str_formula_conj(list_formula_cos_long_noise_comp)
+
+cos_series_long_noise_formula <- model_series_by_formula_conj(list_formula_cos_long_noise_comp, 100)
+plot(cos_series_long_noise, type = "l", col = "red")
+lines(cos_series_long, lty = 6, lwd = 2, col = "purple")
+lines(cos_series_long_noise_formula, lty = 3, lwd = 2, col = "green")
+legend(x="bottom", legend = c("original + noise", "original", "formula (compressed)"), lty = c(1, 6, 3), col = c("red", "purple", "green"))
+```
+
+## Cadzow
+
+Применим итерации Cadzow к нашему сложному модельному ряду:
+
+```{r}
+series <- cos_series_long_noise
+N <- length(series)
+L <- L_cos_long
+K <- N - L + 1
+rank <- 3
+
+s0 <- ssa(series, L = L)
+r0 <- reconstruct(s0, groups = list(signal = 1:rank))$signal
+
+alpha <- 0.1
+weights <- numeric(K)
+weights[1:K] <- alpha
+weights[seq(from = K, to = 1, by = -L)] <- 1
+s <- ssa(series, L = L, column.oblique = "identity", 
+         row.oblique = weights, decompose.force = FALSE)
+c <- cadzow(s, rank = rank)
+sc <- ssa(c, L = rank + 1)
+rc <- reconstruct(sc, groups = list(signal = 1:rank))$signal
+plot(series, type = "l")
+lines(cos_series_long, col = "purple")
+lines(r0, col = "blue")
+lines(rc, col = "red", lty = 2)
+legend(x = "topleft", c("original + noise", "original", "ssa", "cadzow"), col = c("black", "purple", "blue", "red"), lty = c(1, 1, 1, 2))
+```
+
+Видно, что он немного отличается от ssa, причём не в лучшую сторону. Посмотрим на формулу:
+
+```{r}
+list_formula_cos_long_noise_c <- find_explicit_formula_conj(rc, parestimate(sc, groups = list(1:rank), method = "esprit")$roots)
+list_formula_cos_long_noise_c_comp <- compress_sincos_to_cos(list_formula_cos_long_noise_c)
+
+cat("Original:", create_str_formula_conj(list_formula_cos_long_noise_comp), "\n")
+cat("Cadzow:", create_str_formula_conj(list_formula_cos_long_noise_c_comp))
+```
+
+Она значительно поменялась.
+
+## Явная формула для реального ряда (электричество)
+
+Вспомним ряд электричества и найдём для него сигнальные корни:
+
+```{r}
+plot(s_electr, type = "series", groups = list(c(1, 6), c(2:5, 7:10)))
+l_electr <- lrr(s_electr, groups = list(1:20))
+plot(l_electr)
+```
+
+Берём определённую группу, чтобы не вносить шум в формулу:
+
+```{r}
+par_electr <- parestimate(s_electr, groups = list(c(1:10, 14)), method = "esprit")
+par_electr
+```
+
+По корням строим формулу:
+
+```{r}
+list_formula_electr <- find_explicit_formula_conj(ts_electr_2, roots = par_electr$roots)
+list_formula_electr_comp <- compress_sincos_to_cos(list_formula_electr)
+create_str_formula_conj(list_formula_electr)
+create_str_formula_conj(list_formula_electr_comp)
+
+ts_electr_formula <- ts(model_series_by_formula_conj(list_formula_electr_comp, length(ts_electr_2)), frequency = 12)
+plot(ts_electr_2, type = "l", col = "red")
+lines(r_electr$Trend + r_electr$Seasonality, lty = 6, lwd = 2, col = "purple")
+lines(ts_electr_formula, lty = 3, lwd = 2, col = "green")
+legend(x="bottom", legend = c("original", "ssa", "formula (compressed)"), lty = c(1, 3), col = c("red", "purple", "green"))
+```
+
+Видим, что она получилась достаточно похожей на то, что выделил SSA.
+
+## Сбор корней на примере
+
+Проверим, что если перевернуть ряд, то несигнальные корни останутся внутри единичного круга, а сигнальные поменяют расположение. Возьмём наш сложный ряд и добавим туда экспоненту с отрицательным показателем:
+
+```{r}
+N_epc <- length(epc_series)
+L_epc_exp <- 8
+epc_series_exp <- epc_series + exp(-4 * (1:N_epc) / N_epc)
+plot(epc_series_exp, type = "l")
+s_epc_series_exp <- ssa(epc_series_exp, L = N_epc %/% 2, svd.method = "svd")
+l_epc_series_exp <- lrr(s_epc_series_exp, groups = list(1:(L_epc_exp - 1)))
+
+plot(l_epc_series_exp)
+```
+
+А теперь перевёрнутый
+
+```{r}
+s_epc_series_exp_rev <- ssa(rev(epc_series_exp), L = N_epc %/% 2, svd.method = "svd")
+l_epc_series_exp_rev <- lrr(s_epc_series_exp_rev, groups = list(1:(L_epc_exp - 1)))
+
+plot(l_epc_series_exp_rev)
+```
+
+Действительно корни по модулю меньшие нуля стали больше нуля, а большие --- меньше.
+
+# IOSSA
+
+Применим IOSSA к ряду косинуса плюс полином второй степени:
+
+```{r}
+N_cos_poly <- 100
+ts_cos_12 <- ts(cos(2 * pi * (1:N_cos_poly) / 12), frequency = 12)
+ts_poli_2 <- ts(5 * (2 * (1:N_cos_poly) / N_cos_poly) ** 2 - 3 * ((1:N_cos_poly) / N_cos_poly) + 10, frequency = 12)
+ts_cos_poly <- ts_cos_12 + ts_poli_2
+plot(ts_cos_poly)
+s_cos_poly <- ssa(ts_cos_poly, L = (N_cos_poly %/% 2) %/% 12 * 12, kind = "1d-ssa", svd.method = "svd")
+plot(s_cos_poly, type = "vectors", idx = 1:10)
+r_cos_poly <- reconstruct(s_cos_poly, 
+                      groups = list(Trend = c(1, 4, 5), Seasonality = 2:3))
+s_cos_poly_i <- iossa(s_cos_poly, nested.groups = list(c(1, 4, 5), c(2, 3)))
+plot(s_cos_poly_i, type = "vectors", idx = 1:10)
+r_cos_poly_i <- reconstruct(s_cos_poly_i, 
+                      groups = list(Trend = 1:3, Seasonality = 4:5))
+
+plot(r_cos_poly$Trend)
+lines(r_cos_poly_i$Trend, col = "red")
+```
+
+# EOSSA
+
+Применим EOSSA к ряду косинуса плюс полином второй степени:
+
+```{r}
+plot(ts_cos_poly)
+s_cos_poly <- ssa(ts_cos_poly, L = (N_cos_poly %/% 2) %/% 12 * 12, kind = "1d-ssa", svd.method = "svd")
+plot(s_cos_poly, type = "vectors", idx = 1:10)
+r_cos_poly <- reconstruct(s_cos_poly, 
+                      groups = list(Trend = c(1, 4, 5), Seasonality = 2:3))
+s_cos_poly_e <- eossa(s_cos_poly, nested.groups = list(c(1, 4, 5), c(2, 3)))
+plot(s_cos_poly_e, type = "vectors", idx = 1:10)
+r_cos_poly_e <- reconstruct(s_cos_poly_e, 
+                      groups = list(Trend = 1:3, Seasonality = 4:5))
+
+plot(ts_poli_2)
+lines(r_cos_poly$Trend, col = "red", lty = 2, lwd = 2)
+lines(r_cos_poly_e$Trend, col = "blue", lty = 3, lwd = 2)
+legend(x = "topleft", c("original poli", "SSA trend", "EOSSA trend"), col = c("black", "red", "blue"), lty = c(1, 2, 3), lwd = c(1, 2, 2))
+
+plot(ts_cos_12)
+lines(r_cos_poly$Seasonality, col = "red", lty = 2, lwd = 2)
+lines(r_cos_poly_e$Seasonality, col = "blue", lty = 3, lwd = 2)
+legend(x = "topleft", c("original cos", "SSA seasonality", "EOSSA seasonality"), col = c("black", "red", "blue"), lty = c(1, 2, 3), lwd = c(1, 2, 2))
+```
+
+Видим, что мы действительно разделили тренд и сезонность.
+
+## Реальные данные
+
+Попробуем применить eossa к реальным данным по электричеству:
+
+```{r}
+plot(s_electr, type = "vectors", idx = 1:20)
+s_electr_e <- eossa(s_electr, nested.groups = list(c(1, 6, 11:13), c(2:5, 7:10)), k = 6)
+plot(s_electr_e, type = "vectors", idx = 1:20)
+r_electr_e <- reconstruct(s_electr_e, 
+                      groups = list(Trend = c(1:3), Seasonality = c(4:13)))
+
+plot(ts_electr_2)
+lines(r_electr$Trend, col = "red", lty = 2, lwd = 2)
+lines(r_electr_e$Trend, col = "blue", lty = 3, lwd = 2)
+legend(x = "topleft", c("original", "SSA trend", "EOSSA trend"), col = c("black", "red", "blue"), lty = c(1, 2, 3), lwd = c(1, 2, 2))
+
+plot(r_electr$Seasonality, lty = 1, lwd = 1)
+lines(r_electr_e$Seasonality, col = "red", lty = 2, lwd = 2)
+legend(x = "topleft", c("SSA seasonality", "EOSSA seasonality"), col = c("black", "red"), lty = c(1, 2), lwd = c(1, 2))
+```
+
+Видим, что в начале тренд выделился лучше.
+
+## EOSSA (new)
+
+Проверим новый вариант eossa на реальных данных:
+
+```{r}
+s_electr_e_n <- eossa_new(s_electr, nested.groups = list(c(1, 6, 11:13), c(2:5, 7:10)), clust_type = "distance")
+s_electr_e_n$iossa.groups
+plot(s_electr_e_n, type = "vectors", idx = 1:20)
+r_electr_e_n <- reconstruct(s_electr_e_n, 
+                      groups = list(Trend = c(1:3), Seasonality = c(4:13)))
+
+plot(ts_electr_2)
+lines(r_electr$Trend, col = "red", lty = 2, lwd = 2)
+lines(r_electr_e$Trend, col = "blue", lty = 3, lwd = 2)
+lines(r_electr_e_n$Trend, col = "green", lty = 6, lwd = 2)
+legend(x = "topleft", c("original", "SSA trend", "EOSSA trend", "EOSSA new trend"), col = c("black", "red", "blue", "green"), lty = c(1, 2, 3, 6), lwd = c(1, 2, 2, 2))
+
+plot(r_electr$Seasonality, col = "red", lty = 1, lwd = 1)
+lines(r_electr_e$Seasonality, col = "blue", lty = 2, lwd = 2)
+lines(r_electr_e_n$Seasonality, col = "green", lty = 6, lwd = 2)
+legend(x = "topleft", c("SSA seasonality", "EOSSA seasonality", "EOSSA new trend"), col = c("red", "blue", "green"), lty = c(1, 2, 6), lwd = c(1, 2, 2))
+```
+
+То же самое.
+
+# Decompose
+
+Применим декомпозицию ряда: выделив только один период 12 и периоды 10, 12 и 13:
+
+```{r fig.height=8}
+dec_electr <- stats::decompose(ts_electr_2)
+plot(dec_electr)
+
+spec.pgram(na.exclude(dec_electr$random), taper = 0, log='no', fast = FALSE)
+acf(na.exclude(dec_electr$random))
+
+ts_electr_10 <- ts(as.vector(electricity_data$electr), frequency = 10)
+dec_electr_10 <- stats::decompose(ts_electr_10)
+plot(dec_electr_10)
+
+spec.pgram(na.exclude(dec_electr_10$random), taper = 0, log='no', fast = FALSE)
+acf(na.exclude(dec_electr_10$random))
+
+ts_electr_12 <- ts(dec_electr_10$x - dec_electr_10$seasonal, frequency = 12)
+dec_electr_12 <- stats::decompose(ts_electr_12)
+plot(dec_electr_12)
+
+spec.pgram(na.exclude(dec_electr_12$random), taper = 0, log='no', fast = FALSE)
+acf(na.exclude(dec_electr_12$random))
+
+ts_electr_13 <- ts(dec_electr_12$x - dec_electr_12$seasonal, frequency = 13)
+dec_electr_13 <- stats::decompose(ts_electr_13)
+plot(dec_electr_13)
+
+spec.pgram(na.exclude(dec_electr_13$random), taper = 0, log='no', fast = FALSE)
+acf(na.exclude(dec_electr_13$random))
+```
+
+Тренд для одного периода даже глаже.
+
+Теперь применим loess декомпозицию:
+
+```{r fig.height=8}
+stl_electr <- stl(ts_electr_2, s.window = 7, s.degree = 1)
+plot(stl_electr)
+spec.pgram(stl_electr$time.series[, 3], taper = 0, log='no', fast = FALSE)
+acf(stl_electr$time.series[, 3])
+```
+
+Сравнение трендов декомпозиции, loess и SSA:
+
+```{r}
+plot(as.vector(dec_electr$x), type = "l")
+lines(as.vector(r_electr_auto_fossa$trend), type = "l", col = "purple")
+lines(as.vector(dec_electr$trend), type = "l", col = "red")
+lines(as.vector(stl_electr$time.series[, 2]), type = "l", col = "blue")
+legend(x = "bottomright", c("series", "Fossa SSA", "decompose 12", "decompose 10, 12, 13"), lty = 1, lwd = 1, col = c("black", "purple", "red", "blue"))
+
+spec.pgram(as.vector(residuals(r_electr_auto_fossa)), taper = 0, log='no', fast = FALSE)
+acf(as.vector(residuals(r_electr_auto_fossa)))
+```
+
+# Пердсказание
+
+Обрежем наш ряд на 2 периода:
+
+```{r}
+ts_electr_sh <- ts(ts_electr_2[1:(length(ts_electr_2) - 2 * freq_12)], frequency = freq_12)
+
+L_electr_sh <- length(ts_electr_sh) %/% 2 %/% 12 * 12
+s_electr_sh <- ssa(ts_electr_sh, kind = "1d-ssa", svd.method = "svd", L = L_electr_sh)
+plot(s_electr_sh, type = "vectors", idx = 1:20)
+
+s_electr_sh_e <- eossa(s_electr_sh, nested.groups = list(c(1, 6, 11:13, 20), c(2:5, 7:10)), k = 7)
+
+plot(s_electr_sh_e, type = "vectors", idx = 1:20)
+r_electr_sh_e <- reconstruct(s_electr_sh_e, 
+                      groups = list(Trend = c(1:3), Seasonality = c(4:13, 20)))
+
+plot(r_electr_sh_e, add.residuals = TRUE, add.original = TRUE,
+     plot.method = "xyplot",
+     superpose = TRUE, auto.key = list(columns = 2))
+
+spec.pgram(as.vector(residuals(r_electr_sh_e)), taper = 0, log='no', fast = FALSE)
+```
+
+И предскажем сначала весь сигнал и сравним с рядом:
+
+```{r}
+forecast.len <- 2 * freq_12
+rfor_electr <- rforecast(s_electr_sh_e, groups = list(1:13),
+                     len = forecast.len)
+vfor_electr <- vforecast(s_electr_sh_e, groups = list(1:13),
+                     len = forecast.len)
+plot(ts_electr_2, type = "l")
+lines(ts(c(rep(NA, length(ts_electr_sh)), rfor_electr), frequency = freq_12), type = "l", col = "blue")
+lines(ts(c(rep(NA, length(ts_electr_sh)), vfor_electr), frequency = freq_12), type = "l", col = "red")
+legend(x = "bottom", c("SSA", "rforecast", "vforecast"), lty = 1, col = c("black", "blue", "red"))
+
+plot(ts(ts_electr_2[(length(ts_electr_2) - 2 * freq_12 + 1):length(ts_electr_2)], frequency = freq_12), type = "l")
+lines(ts(rfor_electr, frequency = freq_12), type = "l", col = "blue")
+lines(ts(vfor_electr, frequency = freq_12), type = "l", col = "red")
+legend(x = "bottom", c("SSA", "rforecast", "vforecast"), lty = 1, col = c("black", "blue", "red"))
+```
+
+Теперь только тренд:
+
+```{r}
+rfor_electr_tr <- rforecast(s_electr_sh_e, groups = list(1:3),
+                     len = forecast.len)
+vfor_electr_tr <- vforecast(s_electr_sh_e, groups = list(1:3),
+                     len = forecast.len)
+plot(r_electr_e$Trend, type = "l")
+lines(ts(c(rep(NA, length(r_electr_sh_e$Trend)), rfor_electr_tr), frequency = freq_12), type = "l", col = "blue")
+lines(ts(c(rep(NA, length(r_electr_sh_e$Trend)), vfor_electr_tr), frequency = freq_12), type = "l", col = "red")
+legend(x = "bottom", c("SSA", "rforecast", "vforecast"), lty = 1, col = c("black", "blue", "red"))
+plot(ts(r_electr_e$Trend[(length(r_electr_e$Trend) - 2 * freq_12 + 1):length(r_electr_e$Trend)], frequency = freq_12), type = "l")
+lines(ts(rfor_electr_tr, frequency = freq_12), type = "l", col = "blue")
+lines(ts(vfor_electr_tr, frequency = freq_12), type = "l", col = "red")
+legend(x = "bottom", c("SSA", "rforecast", "vforecast"), lty = 1, col = c("black", "blue", "red"))
+```
+
+Наконец, период:
+
+```{r}
+rfor_electr_se <- rforecast(s_electr_sh_e, groups = list(4:13),
+                     len = forecast.len)
+vfor_electr_se <- vforecast(s_electr_sh_e, groups = list(4:13),
+                     len = forecast.len)
+plot(r_electr_e$Seasonality, type = "l")
+lines(ts(c(rep(NA, length(r_electr_sh_e$Seasonality)), rfor_electr_se), frequency = freq_12), type = "l", col = "blue")
+lines(ts(c(rep(NA, length(r_electr_sh_e$Seasonality)), vfor_electr_se), frequency = freq_12), type = "l", col = "red")
+legend(x = "bottom", c("SSA", "rforecast", "vforecast"), lty = 1, col = c("black", "blue", "red"))
+plot(ts(r_electr_e$Seasonality[(length(r_electr_e$Seasonality) - 2 * freq_12 + 1):length(r_electr_e$Seasonality)], frequency = freq_12), type = "l")
+lines(ts(rfor_electr_se, frequency = freq_12), type = "l", col = "blue")
+lines(ts(vfor_electr_se, frequency = freq_12), type = "l", col = "red")
+legend(x = "bottom", c("SSA", "rforecast", "vforecast"), lty = 1, col = c("black", "blue", "red"))
+```
+
+## ЛРФ прогноз
+
+Возьмём корни для ЛРФ:
+
+```{r}
+par_electr_sh <- parestimate(s_electr_sh_e, groups = list(c(1:13)), method = "esprit")
+par_electr_sh
+```
+
+Построим формулу и прогноз на 10 периодов:
+
+```{r}
+list_formula_electr_sh <- find_explicit_formula_conj(ts_electr_sh, roots = par_electr_sh$roots)
+list_formula_electr_comp_sh <- compress_sincos_to_cos(list_formula_electr_sh)
+create_str_formula_conj(list_formula_electr_comp_sh)
+
+ts_electr_sh_formula <- ts(model_series_by_formula_conj(list_formula_electr_comp_sh, length(ts_electr_sh) + 10 * freq_12), frequency = 12)
+plot(ts_electr_sh_formula, lty = 3, lwd = 2, col = "green")
+lines(r_electr_sh_e$Trend + r_electr_sh_e$Seasonality, lty = 6, lwd = 2, col = "purple")
+lines(ts_electr_sh, type = "l", col = "red")
+legend(x="bottom", legend = c("original", "ssa", "formula (compressed)"), lty = c(1, 3), col = c("red", "purple", "green"))
+```
+
+Так как у нас только один корень, который соответствует экспоненциальному поведению, то логично, что ряд будет возрастать постепенно с медленным увеличением скорости роста, что и видно на графике.
+
+# Доверительные интервалы
+
+Построим бутстреп-доверительные интервалы для нашего предсказания (предсказательный интервал):
+
+```{r}
+plot(s_electr_sh, type = "vectors", idx = 1:20)
+for_electr <- forecast(s_electr_sh, groups = list(c(1:13)),
+                    method = "vector", h = 2 * freq_12,
+                    interval = "prediction",
+                    level=c(0.8, 0.95))
+plot(for_electr)
+lines(ts_electr_2,col="black")
+plot(for_electr, xlim = c(20, 22))
+lines(ts_electr_2,col="black")
+
+s_electr_sh_60 <- ssa(ts_electr_sh, L = 60, svd.method = "svd")
+plot(s_electr_sh_60, type = "vectors", idx = 1:20)
+for_electr_60 <- forecast(s_electr_sh_60, groups = list(c(1:10)),
+                    method = "vector", h = 2 * freq_12,
+                    interval = "prediction",
+                    level=c(0.8, 0.95))
+plot(for_electr_60, xlim = c(20, 22))
+lines(ts_electr_2,col="black")
+
+s_electr_sh_48 <- ssa(ts_electr_sh, L = 48, svd.method = "svd")
+plot(s_electr_sh_48, type = "vectors", idx = 1:20)
+for_electr_48 <- forecast(s_electr_sh_48, groups = list(c(1:8)),
+                    method = "vector", h = 2 * freq_12,
+                    interval = "prediction",
+                    level=c(0.8, 0.95))
+plot(for_electr_48, xlim = c(20, 22))
+lines(ts_electr_2,col="black")
+```
+
+Видим, что реальные значения ряда полностью попадают даже в $80\%$ предсказательный интервал.
+
+Теперь доверительный интервал:
+
+```{r}
+for_electr <- forecast(s_electr_sh, groups = list(c(1:13)),
+                    method = "vector", h = 2 * freq_12,
+                    interval = "confidence",
+                    level=c(0.8, 0.95))
+plot(for_electr)
+lines(ts_electr_2,col="black")
+plot(for_electr, xlim = c(20, 22))
+lines(ts_electr_2,col="black")
+```
+
+Здесь уже видим, что далеко не все точки попадают в предсказательный интервал.
+
+# Работа с пропусками
+
+Сначала воспользуемся стандартным заполнением пропусков на основе разложения и предсказания:
+
+```{r}
+ts_electr_hole <- ts_electr_2
+ts_electr_hole[100:150] <- NA
+plot(ts_electr_hole)
+s_electr_hole <- ssa(ts_electr_hole, L = 60)
+
+g_electr <- gapfill(s_electr_hole, groups = list(c(1, 6)), method = "sequential", 
+             base = "reconstructed")
+g0_electr <- gapfill(s_electr_hole, groups = list(c(1, 6)), method = "sequential", 
+              alpha = 0, base = "reconstructed")
+g1_electr <- gapfill(s_electr_hole, groups = list(c(1, 6)), method = "sequential", 
+              alpha = 1, base = "reconstructed")
+plot(ts_electr_2, col = "black")
+lines(g0_electr, col = "blue", lwd = 2)
+lines(g1_electr, col = "green", lwd = 2)
+lines(g_electr, col = "red", lwd = 2)
+
+g_electr_all <- gapfill(s_electr_hole, groups = list(c(1:13)), method = "sequential", 
+             base = "reconstructed")
+g0_electr_all <- gapfill(s_electr_hole, groups = list(c(1:13)), method = "sequential", 
+              alpha = 0, base = "reconstructed")
+g1_electr_all <- gapfill(s_electr_hole, groups = list(c(1:13)), method = "sequential", 
+              alpha = 1, base = "reconstructed")
+plot(ts_electr_2, col = "black")
+lines(g0_electr_all, col = "blue", lwd = 2)
+lines(g1_electr_all, col = "green", lwd = 2)
+lines(g_electr_all, col = "red", lwd = 2)
+```
+
+Видим, что в месте, где у нас пропущены значения происходит скачок, поэтому восстановление слева выше реальных значений, а восстановление справа --- ниже. Хотя в среднем значения достаточно близки к правде.
+
+## Итеративное заполнение
+
+Рассмотрим итеративное заполнение пропусков:
+
+```{r}
+ig_electr <- igapfill(s_electr_hole, groups = list(c(1, 6)), 
+               base = "reconstructed")
+igo_electr <- igapfill(s_electr_hole, groups = list(c(1, 6)), 
+                base = "original")
+
+plot(ts_electr_2, col="black")
+lines(ig_electr, col = "blue", lwd = 1)
+lines(igo_electr, col = "red", lwd = 1)
+```
+
+```{r}
+ig1_electr <- igapfill(s_electr_hole, groups = list(c(1, 6)), 
+                base = "original", maxiter = 1)
+ig5_electr <- igapfill(s_electr_hole, groups = list(c(1, 6)), fill = ig1_electr,
+                base = "original", maxiter = 4)
+ig10_electr <- igapfill(s_electr_hole, groups = list(c(1, 6)), fill = ig5_electr, 
+                 base = "original", maxiter = 5)
+init.lin <- ts_electr_2
+init.lin[100:150] <- ts_electr_2[100] + (0:100) / 100 * (ts_electr_2[150] - ts_electr_2[100])
+ig.lin_electr <- igapfill(s_electr_hole, 
+                  fill = init.lin, 
+                  groups = list(c(1, 6)), 
+                  base = "original", maxiter = 10)
+# Compare the result
+plot(ts_electr_2, col = "black")
+lines(ig1_electr, col = "green", lwd = 1)
+lines(ig5_electr, col = "blue", lwd = 1)
+lines(ig10_electr, col = "red", lwd = 1)
+lines(ig.lin_electr, col = "darkred", lwd = 1)
+```
+
+Заполненный тренд становится более выгнутым, подстраиваясь под реальные данные.
+
+## Сравнение на синтетике
+
+Посчитаем среднюю ошибку заполения в центре:
+
+```{r}
+N_csn <- 252
+ts_cos_s <- ts(exp(2 * (1:N_csn) / N_csn) + cos(2 * pi * (1:N_csn) / freq_12 + pi / 3), frequency = freq_12)
+ts_cos_sn <- ts(ts_cos_s + 0.4 * rnorm(N_csn), frequency = freq_12)
+plot(ts_cos_sn)
+ts_cos_sn_hm <- ts_cos_sn
+ts_cos_sn_hm[108:144] <- NA
+lines(ts_cos_sn_hm, col = "red")
+```
+
+```{r}
+s_cos_sn_hm <- ssa(ts_cos_sn_hm, L = 5 * freq_12, svd.method = "svd")
+plot(s_cos_sn_hm, type = "vectors", idx = 1:10)
+g_cos_sn_hm <- gapfill(s_cos_sn_hm, groups = list(c(1, 2, 3)), method = "sequential", 
+             base = "reconstructed")
+
+ig_cos_sn_hm <- igapfill(s_cos_sn_hm, groups = list(c(1, 2, 3)), 
+                base = "reconstructed")
+
+plot(ts_cos_s, col="black")
+lines(g_cos_sn_hm, col = "blue", lwd = 1)
+lines(ig_cos_sn_hm, col = "red", lwd = 1)
+legend(x = "topleft", c("original trend", "gapfill", "igapfill"), lty = 1, lwd = 1, col = c("black", "blue", "red"))
+
+N_model <- 100
+mse_g <- c()
+mse_ig <- c()
+
+for (i in 1:N_model) {
+  ts_cos_s <- ts(exp(2 * (1:N_csn) / N_csn) + cos(2 * pi * (1:N_csn) / freq_12 + pi / 3), frequency = freq_12)
+  ts_cos_sn <- ts(ts_cos_s + 0.4 * rnorm(N_csn), frequency = freq_12)
+  ts_cos_sn_hm <- ts_cos_sn
+  ts_cos_sn_hm[108:144] <- NA
+  
+  s_cos_sn_hm <- ssa(ts_cos_sn_hm, L = 5 * freq_12, svd.method = "svd")
+  
+  g_cos_sn_hm <- gapfill(s_cos_sn_hm, groups = list(c(1, 2, 3)), method = "sequential", 
+             base = "reconstructed")
+
+  ig_cos_sn_hm <- igapfill(s_cos_sn_hm, groups = list(c(1, 2, 3)), 
+                  base = "reconstructed")
+  
+  mse_g <- c(mse_g, mean((ts_cos_s[108:144] - g_cos_sn_hm[108:144]) ** 2))
+  mse_ig <- c(mse_ig, mean((ts_cos_s[108:144] - ig_cos_sn_hm[108:144]) ** 2))
+}
+
+cat("gapfill ", mean(mse_g), "\n")
+cat("iterative gapfill ", mean(mse_ig), "\n")
+```
+
+Итеративный способ лучше:
+
+```{r}
+t.test(mse_g, mse_ig)
+```
+
+А теперь на краях:
+
+```{r}
+plot(ts_cos_sn)
+ts_cos_sn_he <- ts_cos_sn
+ts_cos_sn_he[216:252] <- NA
+lines(ts_cos_sn_he, col = "red")
+```
+
+```{r}
+s_cos_sn_he <- ssa(ts_cos_sn_he, L = 5 * freq_12, svd.method = "svd")
+plot(s_cos_sn_he, type = "vectors", idx = 1:10)
+g_cos_sn_he <- gapfill(s_cos_sn_he, groups = list(c(1, 2, 3)), method = "sequential", 
+             base = "reconstructed")
+
+ig_cos_sn_he <- igapfill(s_cos_sn_he, groups = list(c(1, 2, 3)), 
+                base = "reconstructed")
+
+plot(ts_cos_s, col="black")
+lines(g_cos_sn_he, col = "blue", lwd = 1)
+lines(ig_cos_sn_he, col = "red", lwd = 1)
+legend(x = "topleft", c("original trend", "gapfill", "igapfill"), lty = 1, lwd = 1, col = c("black", "blue", "red"))
+
+N_model <- 100
+mse_g_e <- c()
+mse_ig_e <- c()
+
+for (i in 1:N_model) {
+  ts_cos_s <- ts(exp(2 * (1:N_csn) / N_csn) + cos(2 * pi * (1:N_csn) / freq_12 + pi / 3), frequency = freq_12)
+  ts_cos_sn <- ts(ts_cos_s + 0.4 * rnorm(N_csn), frequency = freq_12)
+  ts_cos_sn_he <- ts_cos_sn
+  ts_cos_sn_he[216:252] <- NA
+  
+  s_cos_sn_he <- ssa(ts_cos_sn_he, L = 5 * freq_12, svd.method = "svd")
+  
+  g_cos_sn_he <- gapfill(s_cos_sn_he, groups = list(c(1, 2, 3)), method = "sequential", 
+             base = "reconstructed")
+
+  ig_cos_sn_he <- igapfill(s_cos_sn_he, groups = list(c(1, 2, 3)), 
+                  base = "reconstructed")
+  
+  mse_g_e <- c(mse_g_e, mean((ts_cos_s[216:252] - g_cos_sn_he[216:252]) ** 2))
+  mse_ig_e <- c(mse_ig_e, mean((ts_cos_s[216:252] - ig_cos_sn_he[216:252]) ** 2))
+}
+
+cat("gapfill ", mean(mse_g_e), "\n")
+cat("iterative gapfill ", mean(mse_ig_e), "\n")
+```
+
+Лучше обычный gapfill (правда, не значимо):
+
+```{r}
+t.test(mse_g_e, mse_ig_e)
+```
+
+# Авторегрессия 
+
+## Проверка оценки параметров
+
+Смоделируем ARIMA ряды с разными параметрами. Для начала чисто авторегрессионный ряд первого порядка:
+
+```{r}
+set.seed(42)
+ts_sim_100 <- arima.sim(list(order = c(1,0,0), ar = 0.7), n = 1000)
+plot(ts_sim_100)
+acf(ts_sim_100, lag.max = 50)
+pacf(ts_sim_100)
+auto.arima(ts_sim_100)
+```
+
+Видим характерное поведение ACF и PACF, а также верная оценка по auto.arima. Теперь модель скользящего среднего первого порядка:
+
+```{r}
+set.seed(42)
+ts_sim_001 <- arima.sim(list(order = c(0,0,1), ma = 0.7), n = 1000)
+plot(ts_sim_001)
+acf(ts_sim_001, lag.max = 100)
+pacf(ts_sim_001)
+auto.arima(ts_sim_001)
+```
+
+Смоделируем что-то посложнее:
+
+```{r}
+set.seed(42)
+ts_sim_523 <- arima.sim(list(order = c(5, 2, 3), ar = c(0.28, -0.2, -0.3, 0.1, 0.4), ma = c(0.7, 0.8, -0.3)), n = 1000)
+plot(ts_sim_523)
+plot(ts_sim_523 |> diff() |> diff())
+acf(ts_sim_523 |> diff() |> diff(), lag.max = 100)
+pacf(ts_sim_523 |> diff() |> diff())
+auto.arima(ts_sim_523)
+```
+
+Попробуем проанализировать некоторые примеры рядов:
+
+```{r}
+ts4 <- ts(read_csv("arima_model/ts4.csv"))
+ts8 <- ts(read_csv("arima_model/ts8.csv"))
+```
+
+Для данного ряда тест Dickey-Fuller говорит о том, что стационарность есть, однако auto.arima определяет порядок дифференцирования $1$, поэтому выберем параметр $d = 1$:
+
+```{r}
+plot(ts4)
+adf.test(ts4)
+plot(ts4 |> diff())
+acf(ts4 |> diff(), lag.max = 100)
+pacf(ts4 |> diff())
+auto.arima(ts4)
+(fit4 <- Arima(ts4, order=c(0,1,1)))
+plot(fit4)
+plot(forecast(fit4, h = 50), xlim = c(2900, 3060))
+```
+
+Для ряда ниже получили модель авторегрессии третьего порядка:
+
+```{r}
+plot(ts8)
+adf.test(ts8)
+acf(ts8, lag.max = 100)
+pacf(ts8)
+auto.arima(ts8)
+(fit8 <- Arima(ts8, order=c(3,0,0)))
+plot(fit8)
+plot(forecast(fit8, h = 10), xlim = c(990, 1020))
+```
+
+## Реальный ряд
+
+Определим параметры ARIMA для данных с электричеством (без сезонности) и построим предсказание с доверительными интервалами:
+
+```{r}
+ts_electr_sh_tr <- ts(ts_electr_sh - r_electr_sh_e$Seasonality)
+plot(ts_electr_sh_tr)
+acf(ts_electr_sh_tr |> diff())
+pacf(ts_electr_sh_tr |> diff())
+auto.arima(ts_electr_sh_tr, stepwise = FALSE, trace = TRUE)
+(fit_elect_arima_tr <- Arima(ts_electr_sh_tr, order=c(0,1,1), include.drift = TRUE))
+
+plot(forecast(fit_elect_arima_tr, h = 2 * freq_12))
+lines(ts(ts_electr_2 - r_electr_e$Seasonality))
+
+plot(forecast(fit_elect_arima_tr, h = 2 * freq_12), xlim = c(200, 260))
+lines(ts(ts_electr_2 - r_electr_e$Seasonality))
+```
+
+Добавим сезонность и применим Seasonal ARIMA:
+
+```{r}
+plot(ts_electr_sh)
+auto.arima(ts_electr_sh, stepwise = FALSE, trace = TRUE)
+(fit_elect_arima <- Arima(ts_electr_sh, order=c(1,1,2), seasonal = c(1,1,1)))
+f_elect_arima <- forecast(fit_elect_arima, h = 2 * freq_12)
+
+plot(f_elect_arima)
+lines(ts_electr_2)
+
+plot(f_elect_arima, xlim = c(20, 22))
+lines(ts_electr_2)
+```
+
+Вычислим ошибки предсказания для SSA и ARIMA:
+
+```{r}
+f_part_electr <- ts_electr_2[(length(ts_electr_2) - 2 * freq_12 + 1):length(ts_electr_2)]
+cat("SSA реккурентное предсказание: ", mean((rfor_electr - f_part_electr) ** 2), "\n")
+cat("SSA векторное предсказание: ", mean((vfor_electr - f_part_electr) ** 2), "\n")
+cat("Seasonal ARIMA предсказание", mean((f_elect_arima$mean - f_part_electr) ** 2), "\n")
+```
+
