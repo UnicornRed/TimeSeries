@@ -25,6 +25,7 @@ library(quadprog)
 library(igraph)
 library(urca)
 library(tseries)
+library(jpeg)
 
 set.seed(52)
 ```
@@ -2300,3 +2301,346 @@ cat("SSA векторное предсказание: ", mean((vfor_electr - f_p
 cat("Seasonal ARIMA предсказание", mean((f_elect_arima$mean - f_part_electr) ** 2), "\n")
 ```
 
+# Обнаружение разладки
+
+## Временная разладка
+
+Сгенерируем ряд с временной разладкой:
+
+```{r}
+N_temp <- 252
+ts_temp_break <- ts(c(1:(N_temp %/% 2), N_temp %/% 2 - 1:(N_temp %/% 2)))
+plot(ts_temp_break)
+```
+
+Построим матрицы неоднородности для разных длин окон:
+
+```{r}
+rank_temp <- 2
+M_temp <- 48; L_temp <- M_temp / 2
+hm48_temp <- hmatr(ts_temp_break, B = M_temp, T = M_temp, L = L_temp, neig = rank_temp)
+plot(hm48_temp)
+```
+
+Наконец, нарисуем функции разладки для разных методов перемещения окон:
+
+```{r fig.height=8, fig.width=8}
+path_hor_temp <- c()
+path_diag_temp <- c()
+path_sdiag_temp <- c()
+
+for (i in 1:ncol(hm48_temp)) {
+  path_hor_temp <- c(path_hor_temp, hm48_temp[i, 20])
+  path_diag_temp <- c(path_diag_temp, hm48_temp[i, i])
+  
+  if (i + M_temp < ncol(hm48_temp))
+    path_sdiag_temp <- c(path_sdiag_temp, hm48_temp[i + M_temp, i])
+}
+
+par(mfrow = c(4, 1))
+plot(c(rep(NA, M_temp), path_hor_temp), type = "l", main = "Horizontal")
+abline(v = N_temp %/% 2, lty = 2)
+plot(c(rep(NA, M_temp), path_diag_temp), type = "l", main = "Diagonal")
+abline(v = N_temp %/% 2, lty = 2)
+plot(c(rep(NA, M_temp), path_sdiag_temp, rep(NA, M_temp)), type = "l", main = "Conjugated")
+abline(v = N_temp %/% 2, lty = 2)
+plot(ts_temp_break, main = "Series")
+abline(v = N_temp %/% 2, lty = 2)
+```
+
+## Постоянная разладка
+
+Сгенерируем ряд со следующей разладкой: сначала сумма косинусов с периодами $7$ и $12$, а потом остаётся только косинус с периодом $12$:
+
+```{r}
+N_cos_break <- 252
+ts_cos_break <- ts(c(1 / 2 * cos(2 * pi * ((N_cos_break %/% 2 + 1):N_cos_break) / 12) + 1 / 2 * cos(2 * pi * ((N_cos_break %/% 2 + 1):N_cos_break) / 7), cos(2 * pi * (1:(N_cos_break %/% 2)) / 12)))
+plot(ts_cos_break)
+```
+
+Построим матрицы неоднородности для разных длин окон:
+
+```{r}
+rank_cos_break <- 4
+M_cos_break <- 48; L_cos_break <- M_cos_break / 2
+hm48_cos_break <- hmatr(ts_cos_break, B = M_cos_break, T = M_cos_break, L = L_cos_break, neig = rank_cos_break)
+plot(hm48_cos_break)
+```
+
+Наконец, нарисуем функции разладки для разных методов перемещения окон:
+
+```{r fig.height=8, fig.width=8}
+path_hor_cos_break <- c()
+path_diag_cos_break <- c()
+path_sdiag_cos_break <- c()
+
+for (i in 1:ncol(hm48_cos_break)) {
+  path_hor_cos_break <- c(path_hor_cos_break, hm48_cos_break[i, 1])
+  path_diag_cos_break <- c(path_diag_cos_break, hm48_cos_break[i, i])
+  
+  if (i + M_cos_break < ncol(hm48_cos_break))
+    path_sdiag_cos_break <- c(path_sdiag_cos_break, hm48_cos_break[i + M_cos_break, i])
+}
+
+par(mfrow = c(4, 1))
+plot(c(rep(NA, M_cos_break), path_hor_cos_break), type = "l", main = "Horizontal")
+abline(v = N_cos_break %/% 2, lty = 2)
+plot(c(rep(NA, M_cos_break), path_diag_cos_break), type = "l", main = "Diagonal")
+abline(v = N_cos_break %/% 2, lty = 2)
+plot(c(rep(NA, M_cos_break), path_sdiag_cos_break, rep(NA, M_cos_break)), type = "l", main = "Conjugated")
+abline(v = N_cos_break %/% 2, lty = 2)
+plot(ts_cos_break, main = "Series")
+abline(v = N_cos_break %/% 2, lty = 2)
+```
+
+## Реальный ряд
+
+Для начала определим количество компонент:
+
+```{r}
+s_electr_48 <- ssa(ts_electr_2[1:48], L = 24)
+plot(s_electr_48, "vectors")
+s_electr_96 <- ssa(ts_electr_2[49:96], L = 24)
+plot(s_electr_96, "vectors")
+```
+
+Применим матрицу неоднородности к реальному ряду:
+
+```{r}
+N_electr <- length(ts_electr_2)
+rank_electr <- 5
+M_electr <- 48; L_electr <- M_electr / 2
+hm48_electr <- hmatr(ts_electr_2, B = M_electr, T = M_electr, L = L_electr, neig = rank_electr)
+plot(hm48_electr)
+```
+
+Нарисуем функции разладки для разных методов перемещения окон:
+
+```{r fig.height=8, fig.width=8}
+path_hor_electr <- c()
+path_diag_electr <- c()
+path_sdiag_electr <- c()
+
+for (i in 1:ncol(hm48_electr)) {
+  path_hor_electr <- c(path_hor_electr, hm48_electr[i, 20])
+  path_diag_electr <- c(path_diag_electr, hm48_electr[i, i])
+  
+  if (i + 60 < ncol(hm48_electr))
+    path_sdiag_electr <- c(path_sdiag_electr, hm48_electr[i + 60, i])
+}
+
+par(mfrow = c(4, 1))
+plot(c(rep(NA, M_electr), path_hor_electr), type = "l", main = "Horizontal")
+abline(v = N_electr %/% 2, lty = 2)
+plot(c(rep(NA, M_electr), path_diag_electr), type = "l", main = "Diagonal")
+abline(v = N_electr %/% 2, lty = 2)
+plot(c(rep(NA, M_electr), path_sdiag_electr, rep(NA, M_electr)), type = "l", main = "Conjugated")
+abline(v = N_electr %/% 2, lty = 2)
+plot(ts_electr_2, main = "Series")
+abline(v = N_electr %/% 2, lty = 2)
+```
+
+Явной разладки не видно.
+
+# Экспоненциальное сглаживание
+
+Применим экспоненциальное сглаживание и сравним с другими методами:
+
+```{r}
+ets_fit_electr <- ets(ts_electr_sh)
+ets_for_electr <- forecast(ets_fit_electr, h = 2 * freq_12)
+err_ets_electr <- (ets_for_electr$mean - f_part_electr) ** 2
+
+print(ets_fit_electr)
+
+cat("SSA реккурентное предсказание: ", sqrt(mean((rfor_electr - f_part_electr) ** 2)), "\n")
+cat("SSA векторное предсказание: ", sqrt(mean((vfor_electr - f_part_electr) ** 2)), "\n")
+cat("Seasonal ARIMA предсказание", sqrt(mean((f_elect_arima$mean - f_part_electr) ** 2)), "\n")
+cat("ETS предсказание: ", sqrt(mean(err_ets_electr)), "\n")
+
+plot(ets_for_electr, xlim = c(19, 22))
+lines(ts_electr_2,col="black")
+```
+
+# MSSA
+
+Сгенерируем систему рядов из сдвинутых по фазе косинусов и экспоненты с одинаковыми показателями и небольшим шумом:
+
+```{r}
+N_cos_multi <- 252
+sd_multi <- 0.2
+num_comp <- 3
+ts_cos_multi <- ts(matrix(sapply(1:num_comp, function(x) exp((1:N_cos_multi) / N_cos_multi) + cos(2 * pi * (1:N_cos_multi) / freq_12 + x) + sd_multi * rnorm(N_cos_multi)), ncol = num_comp), frequency = freq_12)
+plot(ts_cos_multi)
+```
+
+Сделаем MSSA разложение и посмотрим на результат:
+
+```{r}
+L_cos_multi <- N_cos_multi %/% 2 %/% 12 * 12
+s_cos_multi <- ssa(ts_cos_multi, L = L_cos_multi * 4 / 3, kind = "mssa")
+plot(s_cos_multi, type = "vectors", idx = 1:8)
+r_cos_multi <- reconstruct(s_cos_multi,
+                             groups = list(Seasonality = c(1:3)))
+plot(r_cos_multi, add.residuals = FALSE,
+     plot.method = "xyplot",
+     superpose = TRUE, auto.key = list(columns = 3))
+```
+
+Видим хорошее согласование с данными, но насколько оно лучше обычного SSA сказать сложно. Для начала сделаем обычный SSA для каждого ряда:
+
+```{r}
+for (i in 1:num_comp) {
+  s_cos_one <- ssa(ts_cos_multi[, i], L = L_cos_multi)
+  print(plot(s_cos_one, type = "vectors"))
+  r_cos_one <- reconstruct(s_cos_one,
+                               groups = list(Seasonality = c(1:3)))
+  print(plot(r_cos_one, add.residuals = FALSE,
+       plot.method = "xyplot",
+       superpose = TRUE, auto.key = list(columns = 3)))
+}
+```
+
+Наконец, чтобы определить выгоду от MSSA смоделируем систему рядов $100$ раз и усредним квадраты разности между выделенным и реальным сигналом:
+
+```{r}
+resid_multi <- c()
+resid_one <- c()
+
+for (i in 1:100) {
+  ts_cos_multi_signal <- ts(matrix(sapply(1:num_comp, function(x) exp((1:N_cos_multi) / N_cos_multi) + cos(2 * pi * (1:N_cos_multi) / freq_12 + x)), ncol = num_comp), frequency = freq_12)
+  ts_cos_multi <- ts_cos_multi_signal + ts(matrix(sapply(1:num_comp, function(x) sd_multi * rnorm(N_cos_multi)), ncol = num_comp), frequency = freq_12)
+  
+  s_cos_multi <- ssa(ts_cos_multi, L = L_cos_multi * 4 / 3, kind = "mssa")
+  r_cos_multi <- reconstruct(s_cos_multi,
+                               groups = list(Signal = c(1:3)))
+  
+  resid_one_comp <- c()
+  
+  for (j in 1:num_comp) {
+    s_cos_one <- ssa(ts_cos_multi[, j], L = L_cos_multi)
+    r_cos_one <- reconstruct(s_cos_one,
+                                 groups = list(Signal = c(1:3)))
+    
+    resid_one_comp <- c(resid_one_comp, r_cos_one$Signal)
+  }
+  
+  resid_multi <- c(resid_multi, mean((r_cos_multi$Signal - ts_cos_multi_signal) ** 2))
+  resid_one <- c(resid_one, mean((resid_one_comp - ts_cos_multi_signal) ** 2))
+}
+
+cat("SSA", mean(resid_one), "\n")
+cat("MSSA", mean(resid_multi), "\n")
+t.test(resid_one, resid_multi)
+```
+
+Действительно MSSA лучше для системы рядов.
+
+## Поддерживающие ряды
+
+Исследуем возможность поддерживающих рядов. Для чего будем генерировать систему рядов, первый из которых имеет постоянный шум с $\text{sd} = 0.2$, а второй --- переменный. Посмотрим на изменения ошибок:
+
+```{r}
+num_comp <- 2
+num_ch <- 4
+sd_multi <- 0.2
+sd_multi_ch <- c(0.1, 0.2, 0.4, 0.6)
+
+for (k in 1:num_ch) {
+  resid_multi <- c()
+  resid_one <- c()
+  
+  for (i in 1:100) {
+    ts_cos_multi_signal <- ts(matrix(c(exp((1:N_cos_multi) / N_cos_multi) + cos(2 * pi * (1:N_cos_multi) / freq_12 + 1), exp((1:N_cos_multi) / N_cos_multi) + cos(2 * pi * (1:N_cos_multi) / freq_12 + 2)), ncol = num_comp), frequency = freq_12)
+    ts_cos_multi <- ts_cos_multi_signal + ts(matrix(c(sd_multi * rnorm(N_cos_multi), sd_multi_ch[k] * rnorm(N_cos_multi)), ncol = num_comp), frequency = freq_12)
+    
+    resid_one_comp <- c()
+  
+    for (j in 1:num_comp) {
+      s_cos_one <- ssa(ts_cos_multi[, j], L = L_cos_multi)
+      r_cos_one <- reconstruct(s_cos_one,
+                                   groups = list(Signal = c(1:3)))
+      
+      resid_one_comp <- cbind(resid_one_comp, r_cos_one$Signal)
+    }
+    
+    s_cos_multi <- ssa(ts_cos_multi, L = L_cos_multi, kind = "mssa")
+    r_cos_multi <- reconstruct(s_cos_multi,
+                                 groups = list(Signal = c(1:3)))
+    
+    resid_multi <- c(resid_multi, mean((r_cos_multi$Signal[, 1] - ts_cos_multi_signal[, 1]) ** 2))
+    resid_one <- c(resid_one, mean((resid_one_comp[, 1] - ts_cos_multi_signal[, 1]) ** 2))
+  }
+  
+  cat("SSA (sd = ", sd_multi_ch[k], "): ", mean(resid_one), "\n", sep = "")
+  cat("MSSA (sd = ", sd_multi_ch[k], "): ", mean(resid_multi), "\n",sep = "")
+  print(t.test(resid_one, resid_multi))
+}
+```
+
+При шуме в $2$ раза больше уже отличия от обычного SSA незначительны.
+
+# 2D-SSA
+
+Возьмём некоторую ЧБ картинку:
+
+```{r fig.height=6, fig.width=6}
+image_path <- "Lenin.jpg"
+img <- readJPEG(image_path)
+
+
+if (length(dim(img)) == 3) {
+  gray_img <- 0.299 * img[,,1] + 0.587 * img[,,2] + 0.114 * img[,,3]
+} else {
+  gray_img <- img
+}
+
+Lenin <- round(gray_img * 255)
+image(t(apply(Lenin, 2, rev)), col = gray.colors(256, start = 0, end = 1), axes = FALSE)
+```
+
+Применим некоторый синусный шум:
+
+```{r fig.height=6, fig.width=6}
+add_sin_noise <- function(mat, mean = 0, sd = 10) {
+  noise <- sd * sin(2 * pi * (1:length(mat)) / 13 + pi / 3)
+  noisy_mat <- mat + matrix(noise, nrow = nrow(mat), ncol = ncol(mat))
+  
+  noisy_mat <- pmin(pmax(round(noisy_mat), 0), 255)
+  
+  return(noisy_mat)
+}
+
+Lenin_noise <- add_sin_noise(Lenin, sd = 20)
+image(t(apply(Lenin_noise, 2, rev)), col = gray.colors(256, start = 0, end = 1), axes = FALSE)
+```
+
+Сделаем SSA разложение и определим шумовые компоненты:
+
+```{r}
+s_lenin <- ssa(Lenin_noise, kind = "2d-ssa", L = c(30, 30))
+plot(s_lenin, type = "vectors", idx = 1:20,
+     cuts = 255, layout = c(10, 2),
+     plot.contrib = FALSE)
+plot(wcor(s_lenin, groups = 1:20),
+     scales = list(at = c(10, 20, 30)))
+```
+
+Компоненты $6$ и $7$ являются шумовыми. Выделим их и нарисуем остатки:
+
+```{r}
+r_lenin <- reconstruct(s_lenin, 
+                        groups = list(Noise = c(6:7)))
+plot(r_lenin, cuts = 255, layout = c(3, 1))
+```
+
+Сравним все картинки по порядку:
+
+```{r fig.height=5, fig.width=10}
+par(mfrow = c(1, 3))
+image(t(apply(Lenin, 2, rev)), col = gray.colors(256, start = 0, end = 1), axes = FALSE)
+image(t(apply(Lenin_noise, 2, rev)), col = gray.colors(256, start = 0, end = 1), axes = FALSE)
+image(t(apply(residuals(r_lenin), 2, rev)), col = gray.colors(256, start = 0, end = 1), axes = FALSE)
+```
+
+Видим, что шум выделился очень хорошо.
